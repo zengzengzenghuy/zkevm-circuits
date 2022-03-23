@@ -1,11 +1,12 @@
 use ethers::{
     abi::Tokenize,
-    contract::{Contract, ContractFactory},
+    contract::{builders::ContractCall, Contract, ContractFactory},
+    core::k256::ecdsa::SigningKey,
     core::types::{TransactionRequest, U256},
     core::utils::WEI_IN_ETHER,
     middleware::SignerMiddleware,
-    providers::Middleware,
-    signers::Signer,
+    providers::{Http, Middleware, Provider},
+    signers::{Signer, Wallet},
     solc::Solc,
 };
 use integration_tests::{
@@ -96,16 +97,17 @@ async fn main() {
     }
 
     // Make sure the blockchain is in a clean state: block 0 is the last block.
-    let block_number = prov
-        .get_block_number()
-        .await
-        .expect("cannot get block number");
-    if block_number.as_u64() != 0 {
-        panic!(
-            "Blockchain is not in a clean state.  Last block number: {}",
-            block_number
-        );
-    }
+    // TODO: Uncomment this before submitting a PR
+    // let block_number = prov
+    //     .get_block_number()
+    //     .await
+    //     .expect("cannot get block number");
+    // if block_number.as_u64() != 0 {
+    //     panic!(
+    //         "Blockchain is not in a clean state.  Last block number: {}",
+    //         block_number
+    //     );
+    // }
 
     let accounts = prov.get_accounts().await.expect("cannot get accounts");
     let wallet0 = get_wallet(0);
@@ -130,6 +132,8 @@ async fn main() {
     // Deploy smart contracts
     let mut deployments = HashMap::new();
     let prov_wallet0 = Arc::new(SignerMiddleware::new(get_provider(), wallet0));
+
+    // Greeter
     let contract = deploy(
         prov_wallet0.clone(),
         contracts.get("Greeter").expect("contract not found"),
@@ -140,6 +144,25 @@ async fn main() {
     blocks.insert("Deploy Greeter".to_string(), block_num.as_u64());
     deployments.insert(
         "Greeter".to_string(),
+        (block_num.as_u64(), contract.address()),
+    );
+
+    // OpenZeppelinERC20TestToken
+    let contract = deploy(
+        prov_wallet0.clone(),
+        contracts
+            .get("OpenZeppelinERC20TestToken")
+            .expect("contract not found"),
+        prov_wallet0.address(),
+    )
+    .await;
+    let block_num = prov.get_block_number().await.expect("cannot get block_num");
+    blocks.insert(
+        "Deploy OpenZeppelinERC20TestToken".to_string(),
+        block_num.as_u64(),
+    );
+    deployments.insert(
+        "OpenZeppelinERC20TestToken".to_string(),
         (block_num.as_u64(), contract.address()),
     );
 
@@ -194,6 +217,36 @@ async fn main() {
     }
     let block_num = prov.get_block_number().await.expect("cannot get block_num");
     blocks.insert("Multiple transfers 0".to_string(), block_num.as_u64());
+
+    // OpenZeppelin ERC20 single failed transfer (wallet2 sends 345.67 Tokens to
+    // wallet3)
+
+    // OpenZeppelin ERC20 single successful transfer (wallet0 sends 123.45 Tokens to
+    // wallet1)
+    let contract = Contract::new(
+        deployments
+            .get("OpenZeppelinERC20TestToken")
+            .expect("contract not found")
+            .1,
+        contracts
+            .get("OpenZeppelinERC20TestToken")
+            .expect("contract not found")
+            .abi
+            .clone(),
+        prov_wallet0,
+    );
+    let amount = U256::from_dec_str(&"123456000000000000000").unwrap();
+    let call: ContractCall<SignerMiddleware<Provider<Http>, Wallet<SigningKey>>, _> = contract
+        .method::<_, bool>(
+            "transfer",
+            &[
+                wallets[1].address().into_tokens()[0].clone(),
+                amount.into_tokens()[0].clone(),
+            ][..],
+        )
+        .expect("cannot construct ERC20 transfer call");
+    let pending_tx = call.send().await.expect("cannot send ERC20 transfer call");
+    let receipt = pending_tx.confirmations(0usize).await.unwrap();
 
     let gen_data = GenDataOutput {
         coinbase: accounts[0],
