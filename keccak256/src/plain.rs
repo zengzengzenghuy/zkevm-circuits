@@ -46,6 +46,7 @@ pub struct KeccakF {}
 
 impl KeccakF {
     pub fn permutations(&self, a: &mut State) {
+        println!("Perm");
         for rc in ROUND_CONSTANTS.iter().take(PERMUTATION) {
             *a = KeccakF::round_b(*a, *rc);
         }
@@ -195,6 +196,17 @@ fn test_empty_input() {
         202, 130, 39, 59, 123, 250, 216, 4, 93, 133, 164, 112,
     ];
     assert_eq!(keccak256(&[]), output);
+}
+
+#[test]
+fn test_pad() {
+    let output = [
+        58, 89, 18, 167, 197, 250, 160, 110, 228, 254, 144, 98, 83, 227, 57, 70, 122, 156, 232,
+        125, 83, 60, 101, 190, 60, 21, 203, 35, 28, 219, 37, 249,
+    ];
+    // cargo test -p keccak256 test_pad -- --nocapture
+    // This takes 2 permutation actually
+    assert_eq!(keccak256(&[0; 136]), output);
 }
 
 #[test]
