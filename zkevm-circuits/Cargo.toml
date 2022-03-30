@@ -12,7 +12,7 @@ halo2_proofs = { git = "https://github.com/appliedzkp/halo2.git", tag = "v2022_0
 pairing = { git = 'https://github.com/appliedzkp/pairing', package = "pairing_bn256" }
 bigint = "4"
 num = "0.4"
-sha3 = "0.7.2"
+sha3 = "0.10"
 digest = "0.7.6"
 array-init = "2.0.0"
 paste = "1.0"
@@ -26,8 +26,22 @@ rand = "0.8"
 itertools = "0.10.3"
 lazy_static = "1.4"
 keccak256 = { path = "../keccak256"}
-log = "0.4.14"
+log = "0.4"
 env_logger = "0.9"
+# ecdsa = { git = "https://github.com/appliedzkp/halo2wrong.git", rev = "00b90e8c3198de0a73cdb6308f7dbea2bd6f24cc", features = ["kzg"] }
+# TODO: Replace by github path once https://github.com/appliedzkp/halo2wrong/pull/25 is merged
+ecdsa = { git = "https://github.com/ed255/halo2wrong", rev = "ed5611493babc39abc41f1249b7b54c4f3c0254c", features = ["kzg"] }
+secp256k1 = { git = "https://github.com/ed255/halo2wrong", rev = "ed5611493babc39abc41f1249b7b54c4f3c0254c", features = ["kzg"] }
+ecc =       { git = "https://github.com/ed255/halo2wrong", rev = "ed5611493babc39abc41f1249b7b54c4f3c0254c", features = ["kzg"] }
+maingate =  { git = "https://github.com/ed255/halo2wrong", rev = "ed5611493babc39abc41f1249b7b54c4f3c0254c", features = ["kzg"] }
+integer =   { git = "https://github.com/ed255/halo2wrong", rev = "ed5611493babc39abc41f1249b7b54c4f3c0254c", features = ["kzg"] }
+group = "0.11"
+k256 = "0.10.4"
+generic-array = "0.12.4"
+libsecp256k1 = "0.7"
+rlp = "0.5"
+num-bigint = { version = "0.4" }
+subtle = "2.4"
 
 [dev-dependencies]
 criterion = "0.3"
@@ -36,6 +50,9 @@ env_logger = "0.9.0"
 hex = "0.4.3"
 mock = { path = "../mock" }
 itertools = "0.10.1"
+pretty_assertions = "1.0.0"
+ethers-signers = "0.6"
+rand_chacha = "0.3"
 
 [[bench]]
 name = "binary_value"
