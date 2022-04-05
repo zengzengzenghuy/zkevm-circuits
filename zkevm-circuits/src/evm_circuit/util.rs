@@ -73,6 +73,7 @@ pub(crate) struct RandomLinearCombination<F, const N: usize> {
 impl<F: FieldExt, const N: usize> RandomLinearCombination<F, N> {
     const N_BYTES: usize = N;
 
+    // TODO: replace `bytes` type by a reference
     pub(crate) fn random_linear_combine(bytes: [u8; N], randomness: F) -> F {
         bytes.iter().rev().fold(F::zero(), |acc, byte| {
             acc * randomness + F::from(*byte as u64)

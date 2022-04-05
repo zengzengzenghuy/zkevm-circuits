@@ -495,7 +495,7 @@ dependencies = [
  "bus-mapping",
  "eth-types",
  "ff 0.11.0",
- "halo2_proofs 0.1.0-beta.1 (git+https://github.com/appliedzkp/halo2.git?tag=v2022_03_06)",
+ "halo2_proofs 0.1.0-beta.1",
  "itertools",
  "keccak256",
  "pairing_bn256",
@@ -1799,7 +1799,6 @@ checksum = "eabb4a44450da02c90444cf74558da904edde8fb4e9035a9a6a4e15445af0bd7"
 [[package]]
 name = "halo2_proofs"
 version = "0.1.0-beta.1"
-source = "git+https://github.com/appliedzkp/halo2.git?tag=v2022_03_06#90f0487e986a8d7a323ec78e7de5ad8bbeeebbd5"
 dependencies = [
  "blake2b_simd 1.0.0",
  "bumpalo",
@@ -1813,23 +1812,6 @@ dependencies = [
  "rayon",
  "subtle",
  "tabbycat",
-]
-
-[[package]]
-name = "halo2_proofs"
-version = "0.1.0-beta.1"
-source = "git+https://github.com/appliedzkp/halo2.git?rev=9d3ab0cf7be57a828df6cedb8f58476b483fdde1#9d3ab0cf7be57a828df6cedb8f58476b483fdde1"
-dependencies = [
- "blake2b_simd 1.0.0",
- "bumpalo",
- "cfg-if 0.1.10",
- "ff 0.11.0",
- "group 0.11.0",
- "pairing_bn256",
- "rand",
- "rand_core",
- "rayon",
- "subtle",
 ]
 
 [[package]]
@@ -1851,7 +1833,7 @@ name = "halo2wrong"
 version = "0.1.0"
 dependencies = [
  "cfg-if 0.1.10",
- "halo2_proofs 0.1.0-beta.1 (git+https://github.com/appliedzkp/halo2.git?rev=9d3ab0cf7be57a828df6cedb8f58476b483fdde1)",
+ "halo2_proofs 0.1.0-beta.1",
  "halo2_proofs 0.1.0-beta.3",
 ]
 
@@ -2101,7 +2083,7 @@ dependencies = [
  "eth-types",
  "ethers",
  "ff 0.11.0",
- "halo2_proofs 0.1.0-beta.1 (git+https://github.com/appliedzkp/halo2.git?tag=v2022_03_06)",
+ "halo2_proofs 0.1.0-beta.1",
  "lazy_static",
  "log",
  "pairing_bn256",
@@ -2179,7 +2161,7 @@ name = "keccak256"
 version = "0.1.0"
 dependencies = [
  "eth-types",
- "halo2_proofs 0.1.0-beta.1 (git+https://github.com/appliedzkp/halo2.git?tag=v2022_03_06)",
+ "halo2_proofs 0.1.0-beta.1",
  "itertools",
  "lazy_static",
  "num-bigint",
@@ -2846,7 +2828,7 @@ dependencies = [
  "env_logger",
  "eth-types",
  "ethers-providers",
- "halo2_proofs 0.1.0-beta.1 (git+https://github.com/appliedzkp/halo2.git?tag=v2022_03_06)",
+ "halo2_proofs 0.1.0-beta.1",
  "log",
  "pairing_bn256",
  "rand",
@@ -4195,7 +4177,7 @@ dependencies = [
  "ethers-core",
  "ff 0.11.0",
  "group 0.11.0",
- "halo2_proofs 0.1.0-beta.1 (git+https://github.com/appliedzkp/halo2.git?rev=9d3ab0cf7be57a828df6cedb8f58476b483fdde1)",
+ "halo2_proofs 0.1.0-beta.1",
  "hex",
  "integer",
  "itertools",
@@ -4206,6 +4188,7 @@ dependencies = [
  "num",
  "pairing_bn256",
  "paste",
+ "pretty_assertions",
  "rand",
  "rand_xorshift",
  "secp256k1",

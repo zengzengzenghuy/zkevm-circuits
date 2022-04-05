@@ -1,39 +1,44 @@
-// TODO Remove this
+// TODO Remove th gadgetis
 #![allow(missing_docs)]
 // TODO Remove this
 #![allow(unused_imports)]
 
-use group::{ff::Field, prime::PrimeCurveAffine, Curve};
-use std::{marker::PhantomData, os::unix::prelude::FileTypeExt};
-
+use crate::gadget::is_zero::{IsZeroChip, IsZeroConfig, IsZeroInstruction};
 use ecc::{EccConfig, GeneralEccChip};
 use ecdsa::ecdsa::{AssignedEcdsaSig, AssignedPublicKey, EcdsaChip, EcdsaConfig};
+use group::{ff::Field, prime::PrimeCurveAffine, Curve};
+use halo2_proofs::{
+    arithmetic::{BaseExt, CurveAffine},
+    circuit::{AssignedCell, Layouter, Region, SimpleFloorPlanner},
+    plonk::{
+        Advice, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, Selector, VirtualCells,
+    },
+    poly::Rotation,
+};
 use integer::{
     AssignedInteger, IntegerConfig, IntegerInstructions, WrongExt, NUMBER_OF_LOOKUP_LIMBS,
 };
+use keccak256::plain::Keccak;
 use maingate::{
     Assigned, MainGate, MainGateConfig, RangeChip, RangeConfig, RangeInstructions, RegionCtx,
 };
 use pairing::arithmetic::FieldExt;
 use secp256k1::Secp256k1Affine;
-
-use crate::gadget::is_zero::{IsZeroChip, IsZeroConfig};
-use halo2_proofs::{
-    arithmetic::{BaseExt, CurveAffine},
-    circuit::{AssignedCell, Layouter, Region, SimpleFloorPlanner},
-    plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, VirtualCells},
-    poly::Rotation,
-};
+use std::convert::TryInto;
+use std::{io::Cursor, marker::PhantomData, os::unix::prelude::FileTypeExt};
 
 // TODO: Move these utils outside of `evm_circuit` so that they can be used by
 // other circuits without crossing boundaries.
 use crate::evm_circuit::util::{
-    and, constraint_builder::BaseConstraintBuilder, not, or, select, RandomLinearCombination,
+    and, constraint_builder::BaseConstraintBuilder, not, or, select, RandomLinearCombination, Word,
 };
 use crate::util::Expr;
 
+const POW_RAND_SIZE: usize = 63;
+
 /// Auxiliary Gadget to verify a that a message hash is signed by the public
 /// key corresponding to an Ethereum Address.
+#[derive(Default, Debug)]
 struct SignVerifyChip<F: FieldExt> {
     aux_generator: Secp256k1Affine,
     window_size: usize,
@@ -42,12 +47,14 @@ struct SignVerifyChip<F: FieldExt> {
 }
 
 const KECCAK_IS_ENABLED: usize = 0;
-const KECCAK_INPUT_RLC: usize = 0;
-const KECCAK_INPUT_LEN: usize = 0;
-const KECCAK_OUTPUT_RLC: usize = 0;
+const KECCAK_INPUT_RLC: usize = 1;
+const KECCAK_INPUT_LEN: usize = 2;
+const KECCAK_OUTPUT_RLC: usize = 3;
 
 const BIT_LEN_LIMB: usize = 72;
 
+/// Enable copy constraint between `src` integer limbs and `dst` limbs.  Then
+/// assign the `dst` limbs values from `src`.
 fn copy_integer<F: FieldExt, W: WrongExt>(
     region: &mut Region<'_, F>,
     name: &str,
@@ -67,7 +74,29 @@ fn copy_integer<F: FieldExt, W: WrongExt>(
     Ok(())
 }
 
+fn assign_integer_bytes_le<F: FieldExt, W: BaseExt>(
+    region: &mut Region<'_, F>,
+    name: &str,
+    src: W,
+    dst: &[Column<Advice>],
+    offset: usize,
+) -> Result<(), Error> {
+    let mut src_le = [0u8; 32];
+    src.write(&mut Cursor::new(&mut src_le[..])).unwrap();
+    for (i, byte) in src_le.iter().enumerate() {
+        region.assign_advice(
+            || format!("{} byte {}", name, i),
+            dst[i],
+            offset,
+            || Ok(F::from(*byte as u64)),
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
 struct SignVerifyConfig<F: FieldExt> {
+    q_enable: Selector,
     pub_key_hash: [Column<Advice>; 32],
     address: Column<Advice>,
     msg_hash_rlc: Column<Advice>,
@@ -77,16 +106,23 @@ struct SignVerifyConfig<F: FieldExt> {
     // ECDSA
     main_gate_config: MainGateConfig,
     range_config: RangeConfig,
+    // First 32 cells are coord x in little endian, following 32 cells are coord y in little
+    // endian.
     pub_key: [Column<Advice>; 32 * 2],
     pk_x_limbs: [Column<Advice>; 4],
     pk_y_limbs: [Column<Advice>; 4],
     msg_hash: [Column<Advice>; 32],
     msg_hash_limbs: [Column<Advice>; 4],
     // signature: [[Column<Advice>; 32]; 2],
-    power_of_randomness: [Expression<F>; 63],
+    power_of_randomness: [Expression<F>; POW_RAND_SIZE],
 
     // [is_enabled, input_rlc, input_len, output_rlc]
     keccak_table: [Column<Advice>; 4],
+}
+
+struct KeccakAux {
+    input: [u8; 64],
+    output: [u8; 32],
 }
 
 impl<F: FieldExt> SignVerifyConfig<F> {
@@ -96,6 +132,69 @@ impl<F: FieldExt> SignVerifyConfig<F> {
         range_chip.load_limb_range_table(layouter)?;
         range_chip.load_overflow_range_tables(layouter)?;
 
+        Ok(())
+    }
+
+    pub fn load_keccak(
+        &self,
+        layouter: &mut impl Layouter<F>,
+        auxs: Vec<KeccakAux>,
+        randomness: F,
+    ) -> Result<(), Error> {
+        layouter.assign_region(
+            || "keccak table",
+            |mut region| {
+                let mut offset = 0;
+
+                // All zero row to allow simulating a disabled lookup.
+                for (name, column, value) in &[
+                    ("is_enabled", self.keccak_table[0], F::zero()),
+                    ("input_rlc", self.keccak_table[1], F::zero()),
+                    ("input_len", self.keccak_table[2], F::zero()),
+                    ("output_rlc", self.keccak_table[3], F::zero()),
+                ] {
+                    region.assign_advice(
+                        || format!("Keccak table assign {} {}", name, offset),
+                        *column,
+                        offset,
+                        || Ok(*value),
+                    )?;
+                }
+                offset += 1;
+
+                for aux in &auxs {
+                    let KeccakAux { input, output } = aux;
+                    let input_rlc =
+                        RandomLinearCombination::random_linear_combine(input.clone(), randomness);
+                    let output_rlc = Word::random_linear_combine(output.clone(), randomness);
+                    println!(
+                        "DBG keccak [{:?}, {:}, {:?}]",
+                        input_rlc,
+                        input.len(),
+                        output_rlc
+                    );
+                    for (name, column, value) in &[
+                        ("is_enabled", self.keccak_table[0], F::one()),
+                        ("input_rlc", self.keccak_table[1], input_rlc),
+                        (
+                            "input_len",
+                            self.keccak_table[2],
+                            F::from(input.len() as u64),
+                        ),
+                        ("output_rlc", self.keccak_table[3], output_rlc),
+                    ] {
+                        region.assign_advice(
+                            || format!("Keccak table assign {} {}", name, offset),
+                            *column,
+                            offset,
+                            || Ok(*value),
+                        )?;
+                    }
+                    offset += 1;
+                }
+                Ok(())
+            },
+        )?;
         Ok(())
     }
 
@@ -111,8 +210,9 @@ impl<F: FieldExt> SignVerifyConfig<F> {
 impl<F: FieldExt> SignVerifyChip<F> {
     pub fn configure(
         meta: &mut ConstraintSystem<F>,
-        power_of_randomness: [Expression<F>; 63],
+        power_of_randomness: [Expression<F>; POW_RAND_SIZE],
     ) -> SignVerifyConfig<F> {
+        let q_enable = meta.complex_selector();
         // ECDSA config
         let (rns_base, rns_scalar) = GeneralEccChip::<Secp256k1Affine, F>::rns(BIT_LEN_LIMB);
         let main_gate_config = MainGate::<F>::configure(meta);
@@ -142,11 +242,11 @@ impl<F: FieldExt> SignVerifyChip<F> {
         let msg_hash_rlc_inv = meta.advice_column();
         let msg_hash_rlc_is_zero = IsZeroChip::configure(
             meta,
-            |_| Expression::Constant(F::one()), // always activate
-            |virtual_cells| virtual_cells.query_advice(msg_hash_rlc, Rotation::cur()),
-            msg_hash_rlc_inv, // helper column used internally?
+            |meta| meta.query_selector(q_enable),
+            |meta| meta.query_advice(msg_hash_rlc, Rotation::cur()),
+            msg_hash_rlc_inv,
         );
-        let is_enabled = not::expr(msg_hash_rlc_is_zero.is_zero_expression.clone());
+        let is_not_padding = not::expr(msg_hash_rlc_is_zero.is_zero_expression.clone());
 
         // lookup keccak table
 
@@ -154,25 +254,31 @@ impl<F: FieldExt> SignVerifyChip<F> {
 
         // keccak lookup
         meta.lookup_any("keccak", |meta| {
+            let q_enable = meta.query_selector(q_enable);
+            let selector = q_enable * is_not_padding.clone();
             let mut table_map = Vec::new();
 
             // Column 0: is_enabled
             let keccak_is_enabled =
                 meta.query_advice(keccak_table[KECCAK_IS_ENABLED], Rotation::cur());
-            table_map.push((is_enabled.clone(), keccak_is_enabled));
+            table_map.push((selector.clone(), keccak_is_enabled));
 
             // Column 1: input_rlc (pub_key_rlc)
             let keccak_input_rlc =
                 meta.query_advice(keccak_table[KECCAK_INPUT_RLC], Rotation::cur());
-            let pub_key = pub_key.map(|c| meta.query_advice(c, Rotation::cur()));
-            let pub_key_rlc =
-                RandomLinearCombination::random_linear_combine_expr(pub_key, &power_of_randomness);
-            table_map.push((is_enabled.clone() * pub_key_rlc, keccak_input_rlc));
+            let mut pub_key_be = pub_key.map(|c| meta.query_advice(c, Rotation::cur()));
+            pub_key_be[..32].reverse();
+            pub_key_be[32..].reverse();
+            let pub_key_rlc = RandomLinearCombination::random_linear_combine_expr(
+                pub_key_be,
+                &power_of_randomness,
+            );
+            table_map.push((selector.clone() * pub_key_rlc, keccak_input_rlc));
 
             // Column 2: input_len (64)
             let keccak_input_len =
                 meta.query_advice(keccak_table[KECCAK_INPUT_LEN], Rotation::cur());
-            table_map.push((is_enabled.clone() * 64usize.expr(), keccak_input_len));
+            table_map.push((selector.clone() * 64usize.expr(), keccak_input_len));
 
             // Column 3: output_rlc (pub_key_hash_rlc)
             let keccak_output_rlc =
@@ -182,12 +288,13 @@ impl<F: FieldExt> SignVerifyChip<F> {
                 pub_key_hash,
                 &power_of_randomness,
             );
-            table_map.push((is_enabled.clone() * pub_key_hash_rlc, keccak_output_rlc));
+            table_map.push((selector.clone() * pub_key_hash_rlc, keccak_output_rlc));
 
             table_map
         });
 
         SignVerifyConfig {
+            q_enable,
             pub_key_hash,
             address,
             msg_hash_rlc,
@@ -209,7 +316,7 @@ impl<F: FieldExt> SignVerifyChip<F> {
         &self,
         config: SignVerifyConfig<F>,
         mut layouter: impl Layouter<F>,
-        // randomness: F,
+        randomness: F,
         txs: &[TxSignData],
     ) -> Result<(), Error> {
         let mut ecc_chip =
@@ -238,61 +345,137 @@ impl<F: FieldExt> SignVerifyChip<F> {
         )?;
 
         let ecdsa_chip = EcdsaChip::new(ecc_chip.clone());
+        let msg_hash_rlc_is_zero_chip = IsZeroChip::construct(config.msg_hash_rlc_is_zero.clone());
 
+        let mut keccak_auxs = Vec::new();
         layouter.assign_region(
-            || "ecdsa chip verification",
+            || "signature verify + ecdsa chip verification witness",
             |mut region| {
                 let offset = &mut 0;
                 let ctx = &mut RegionCtx::new(&mut region, offset);
 
-                let integer_r = ecc_chip.new_unassigned_scalar(Some(sig_r));
-                let integer_s = ecc_chip.new_unassigned_scalar(Some(sig_s));
-                let msg_hash = ecc_chip.new_unassigned_scalar(Some(msg_hash));
+                {
+                    let integer_r = ecc_chip.new_unassigned_scalar(Some(sig_r));
+                    let integer_s = ecc_chip.new_unassigned_scalar(Some(sig_s));
+                    let msg_hash = ecc_chip.new_unassigned_scalar(Some(msg_hash));
 
-                let r_assigned = scalar_chip.assign_integer(ctx, integer_r)?;
-                let s_assigned = scalar_chip.assign_integer(ctx, integer_s)?;
-                let sig = AssignedEcdsaSig {
-                    r: r_assigned,
-                    s: s_assigned,
-                };
+                    let r_assigned = scalar_chip.assign_integer(ctx, integer_r)?;
+                    let s_assigned = scalar_chip.assign_integer(ctx, integer_s)?;
+                    let sig = AssignedEcdsaSig {
+                        r: r_assigned,
+                        s: s_assigned,
+                    };
 
-                let pk_in_circuit = ecc_chip.assign_point(ctx, Some(pk.into()))?;
-                let pk_assigned = AssignedPublicKey {
-                    point: pk_in_circuit,
-                };
-                let msg_hash = scalar_chip.assign_integer(ctx, msg_hash)?;
-                ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
+                    let pk_in_circuit = ecc_chip.assign_point(ctx, Some(pk.into()))?;
+                    let pk_assigned = AssignedPublicKey {
+                        point: pk_in_circuit,
+                    };
+                    let msg_hash = scalar_chip.assign_integer(ctx, msg_hash)?;
+                    ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
 
-                let offset = 0;
-                // Copy constraint between ecdsa verification integers and local columns
-                // copy_integer(&mut region, "sig_r", sig.r, &config.sig_r_limbs, offset)?;
-                // copy_integer(&mut region, "sig_s", sig.s, &config.sig_s_limbs, offset)?;
-                copy_integer(
-                    &mut region,
-                    "pk_x",
-                    pk_assigned.point.get_x(),
-                    &config.pk_x_limbs,
-                    offset,
+                    let offset = 0;
+                    // Copy constraint between ecdsa verification integers and local columns
+                    // copy_integer(&mut region, "sig_r", sig.r, &config.sig_r_limbs, offset)?;
+                    // copy_integer(&mut region, "sig_s", sig.s, &config.sig_s_limbs, offset)?;
+                    copy_integer(
+                        &mut region,
+                        "pk_x",
+                        pk_assigned.point.get_x(),
+                        &config.pk_x_limbs,
+                        offset,
+                    )?;
+                    copy_integer(
+                        &mut region,
+                        "pk_y",
+                        pk_assigned.point.get_y(),
+                        &config.pk_y_limbs,
+                        offset,
+                    )?;
+                    copy_integer(
+                        &mut region,
+                        "msg_hash",
+                        msg_hash,
+                        &config.msg_hash_limbs,
+                        offset,
+                    )?;
+                }
+
+                config.q_enable.enable(&mut region, *offset)?;
+
+                // Assign msg_hash_rlc & msg_hash_rlc_is_zero gadget
+                let mut msg_hash_le = [0u8; 32];
+                msg_hash
+                    .write(&mut Cursor::new(&mut msg_hash_le[..]))
+                    .unwrap();
+                let msg_hash_rlc = Word::random_linear_combine(msg_hash_le, randomness);
+                region.assign_advice(
+                    || format!("msg_hash_rlc"),
+                    config.msg_hash_rlc,
+                    *offset,
+                    || Ok(msg_hash_rlc),
                 )?;
-                copy_integer(
-                    &mut region,
-                    "pk_y",
-                    pk_assigned.point.get_y(),
-                    &config.pk_y_limbs,
-                    offset,
-                )?;
-                copy_integer(
-                    &mut region,
-                    "msg_hash",
-                    msg_hash,
-                    &config.msg_hash_limbs,
-                    offset,
-                )?;
+                msg_hash_rlc_is_zero_chip.assign(&mut region, *offset, Some(msg_hash_rlc))?;
+
+                // Assign pub_key
+                let pk_coord = pk.coordinates().unwrap();
+                let mut pk_x_le = [0u8; 32];
+                let mut pk_y_le = [0u8; 32];
+                pk_coord
+                    .x()
+                    .write(&mut Cursor::new(&mut pk_x_le[..]))
+                    .unwrap();
+                pk_coord
+                    .y()
+                    .write(&mut Cursor::new(&mut pk_y_le[..]))
+                    .unwrap();
+                for (i, byte) in pk_x_le.iter().enumerate() {
+                    region.assign_advice(
+                        || format!("pub_key x byte {}", i),
+                        config.pub_key[i],
+                        *offset,
+                        || Ok(F::from(*byte as u64)),
+                    )?;
+                }
+                for (i, byte) in pk_y_le.iter().enumerate() {
+                    region.assign_advice(
+                        || format!("pub_key y byte {}", i),
+                        config.pub_key[32 + i],
+                        *offset,
+                        || Ok(F::from(*byte as u64)),
+                    )?;
+                }
+
+                let mut pk_x_be = pk_x_le.clone();
+                pk_x_be.reverse();
+                let mut pk_y_be = pk_y_le.clone();
+                pk_y_be.reverse();
+                let mut pub_key_bytes_be = [0u8; 64];
+                pub_key_bytes_be[..32].copy_from_slice(&pk_x_be);
+                pub_key_bytes_be[32..].copy_from_slice(&pk_y_be);
+                let mut keccak = Keccak::default();
+                keccak.update(&pub_key_bytes_be);
+                let pub_key_hash = keccak.digest();
+
+                // Assign pub_key_hash
+                for (i, byte) in pub_key_hash.iter().enumerate() {
+                    region.assign_advice(
+                        || format!("pub_key_hash byte {}", i),
+                        config.pub_key_hash[i],
+                        *offset,
+                        || Ok(F::from(*byte as u64)),
+                    )?;
+                }
+
+                keccak_auxs.push(KeccakAux {
+                    input: pub_key_bytes_be,
+                    output: pub_key_hash.try_into().unwrap(),
+                });
 
                 Ok(())
             },
         )?;
 
+        config.load_keccak(&mut layouter, keccak_auxs, randomness)?;
         config.load_range(&mut layouter)?;
 
         Ok(())
@@ -341,13 +524,14 @@ mod sign_verify_tets {
     use group::Group;
     use halo2_proofs::dev::MockProver;
     use halo2_proofs::pairing::bn256::Fr;
+    use pretty_assertions::assert_eq;
     use rand::RngCore;
     use rand::SeedableRng;
     use rand_xorshift::XorShiftRng;
 
     #[derive(Clone, Debug)]
-    struct TestCircuitSignVerifyConfig {
-        sign_verify_config: SignVerifyConfig,
+    struct TestCircuitSignVerifyConfig<F: FieldExt> {
+        sign_verify: SignVerifyConfig<F>,
         /* main_gate_config: MainGateConfig,
          * range_config: RangeConfig,
          * // sig_s_limbs: [Column<Advice>; 4],
@@ -357,13 +541,24 @@ mod sign_verify_tets {
          * msg_hash_limbs: [Column<Advice>; 4], */
     }
 
-    impl TestCircuitSignVerifyConfig {
-        pub fn new<F: FieldExt>(
-            meta: &mut ConstraintSystem<F>,
-            power_of_randomness: [Expression<F>; 63],
-        ) -> Self {
-            let sign_verify_config = SignVerifyChip::configure(&mut meta, power_of_randomness);
-            TestCircuitSignVerifyConfig { sign_verify_config }
+    impl<F: FieldExt> TestCircuitSignVerifyConfig<F> {
+        pub fn new(meta: &mut ConstraintSystem<F>) -> Self {
+            let power_of_randomness = {
+                let columns = [(); POW_RAND_SIZE].map(|_| meta.instance_column());
+                let mut power_of_randomness = None;
+
+                meta.create_gate("power of randomness", |meta| {
+                    power_of_randomness =
+                        Some(columns.map(|column| meta.query_instance(column, Rotation::cur())));
+
+                    [0.expr()]
+                });
+
+                power_of_randomness.unwrap()
+            };
+
+            let sign_verify = SignVerifyChip::configure(meta, power_of_randomness);
+            TestCircuitSignVerifyConfig { sign_verify }
         }
 
         // pub fn ecc_chip_config(&self) -> EccConfig {
@@ -386,7 +581,8 @@ mod sign_verify_tets {
     #[derive(Default)]
     struct TestCircuitSignVerify<F: FieldExt> {
         sign_verify: SignVerifyChip<F>,
-        power_of_randomness: [Expression<F>; 63],
+        randomness: F,
+        // power_of_randomness: [Expression<F>; POW_RAND_SIZE],
         txs: Vec<TxSignData>,
         /* aux_generator: Secp256k1Affine,
          * window_size: usize,
@@ -395,7 +591,7 @@ mod sign_verify_tets {
     }
 
     impl<F: FieldExt> Circuit<F> for TestCircuitSignVerify<F> {
-        type Config = TestCircuitSignVerifyConfig;
+        type Config = TestCircuitSignVerifyConfig<F>;
         type FloorPlanner = SimpleFloorPlanner;
 
         fn without_witnesses(&self) -> Self {
@@ -403,17 +599,20 @@ mod sign_verify_tets {
         }
 
         fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-            TestCircuitSignVerifyConfig::new::<F>(meta, self.power_of_randomness)
+            TestCircuitSignVerifyConfig::new(meta)
         }
 
         fn synthesize(
             &self,
             config: Self::Config,
-            mut layouter: impl Layouter<F>,
+            layouter: impl Layouter<F>,
         ) -> Result<(), Error> {
-            self.assign(config, layouter, self.txs)
+            self.sign_verify
+                .assign(config.sign_verify, layouter, self.randomness, &self.txs)
         }
     }
+
+    const VERIF_HEIGHT: usize = 1;
 
     fn run<F: FieldExt>(txs: Vec<TxSignData>) {
         let k = 20;
@@ -421,21 +620,19 @@ mod sign_verify_tets {
         let aux_generator =
             <Secp256k1Affine as CurveAffine>::CurveExt::random(&mut rng).to_affine();
 
-        let power_of_randomness = (1..61)
-            .map(|exp| {
-                vec![
-                    block.randomness.pow(&[exp, 0, 0, 0]);
-                    block.txs.iter().map(|tx| tx.steps.len()).sum::<usize>() * STEP_HEIGHT
-                ]
-            })
+        let randomness = F::random(&mut rng);
+        let mut power_of_randomness: Vec<Vec<F>> = (1..POW_RAND_SIZE + 1)
+            .map(|exp| vec![randomness.pow(&[exp as u64, 0, 0, 0]); txs.len() * VERIF_HEIGHT])
             .collect();
+        // SignVerifyChip -> ECDSAChip -> MainGate instance column
+        power_of_randomness.push(vec![]);
         let circuit = TestCircuitSignVerify::<F> {
             sign_verify: SignVerifyChip {
                 aux_generator,
                 window_size: 2,
                 _marker: PhantomData,
             },
-            power_of_randomness,
+            randomness,
             txs,
         };
 

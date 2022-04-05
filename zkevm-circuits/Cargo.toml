@@ -38,6 +38,7 @@ criterion = "0.3"
 hex = "0.4.3"
 mock = { path = "../mock" }
 itertools = "0.10.1"
+pretty_assertions = "1.0.0"
 
 [[bench]]
 name = "binary_value"
