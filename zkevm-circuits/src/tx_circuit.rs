@@ -168,12 +168,12 @@ impl<F: FieldExt> SignVerifyConfig<F> {
                     let input_rlc =
                         RandomLinearCombination::random_linear_combine(input.clone(), randomness);
                     let output_rlc = Word::random_linear_combine(output.clone(), randomness);
-                    println!(
-                        "DBG keccak [{:?}, {:}, {:?}]",
-                        input_rlc,
-                        input.len(),
-                        output_rlc
-                    );
+                    // println!(
+                    //     "DBG keccak [{:?}, {:}, {:?}]",
+                    //     input_rlc,
+                    //     input.len(),
+                    //     output_rlc
+                    // );
                     for (name, column, value) in &[
                         ("is_enabled", self.keccak_table[0], F::one()),
                         ("input_rlc", self.keccak_table[1], input_rlc),
@@ -295,6 +295,22 @@ impl<F: FieldExt> SignVerifyChip<F> {
             table_map
         });
 
+        meta.create_gate("address is pub_key_hash[-20:]", |meta| {
+            let q_enable = meta.query_selector(q_enable);
+            let pub_key_hash = pub_key_hash.map(|c| meta.query_advice(c, Rotation::cur()));
+            let address = meta.query_advice(address, Rotation::cur());
+
+            // addr_from_pk = \sum_{i = 0}^{20} pub_key_hash[32-i] * 256^i
+            let addr_from_pk = pub_key_hash[32 - 20..]
+                .iter()
+                .rev()
+                .zip((0..20).map(|i| F::from(256).pow(&[i, 0, 0, 0])))
+                .map(|(b, shift)| b.clone() * Expression::Constant(shift))
+                .fold(0u8.expr(), |acc, v| acc + v.clone());
+
+            vec![q_enable * (address - addr_from_pk)]
+        });
+
         // ECDSA config
         let (rns_base, rns_scalar) = GeneralEccChip::<Secp256k1Affine, F>::rns(BIT_LEN_LIMB);
         let main_gate_config = MainGate::<F>::configure(meta);
@@ -342,14 +358,17 @@ impl<F: FieldExt> SignVerifyChip<F> {
         let (sig_r, sig_s) = signature;
         let pk = pub_key;
 
+        // NOTE: moving the assign region of the "aux" after the "signature verify +
+        // ecdsa chip verification" causes a `Synthesis` error.
         layouter.assign_region(
             || "assign aux values",
             |mut region| {
-                let offset = &mut 0;
-                let ctx = &mut RegionCtx::new(&mut region, offset);
+                let ctx_offset = &mut 0;
+                let ctx = &mut RegionCtx::new(&mut region, ctx_offset);
 
                 ecc_chip.assign_aux_generator(ctx, Some(self.aux_generator))?;
                 ecc_chip.assign_aux(ctx, self.window_size, 1)?;
+                println!("DBG ctx_offset = {}", *ctx_offset);
                 Ok(())
             },
         )?;
@@ -408,6 +427,8 @@ impl<F: FieldExt> SignVerifyChip<F> {
                         &config.msg_hash_limbs,
                         offset,
                     )?;
+
+                    println!("DBG ctx_offset = {}", *ctx_offset);
                 }
 
                 config.q_enable.enable(&mut region, offset)?;
@@ -467,6 +488,9 @@ impl<F: FieldExt> SignVerifyChip<F> {
                 let mut keccak = Keccak::default();
                 keccak.update(&pub_key_bytes_be);
                 let pub_key_hash = keccak.digest();
+                println!("DBG pub_key_hash: {:x?}", pub_key_hash);
+                let address = pub_key_hash_to_address(&pub_key_hash);
+                println!("DBG address: {:?}", address);
 
                 // Assign pub_key_hash
                 for (i, byte) in pub_key_hash.iter().enumerate() {
@@ -482,6 +506,14 @@ impl<F: FieldExt> SignVerifyChip<F> {
                     input: pub_key_bytes_be,
                     output: pub_key_hash.try_into().unwrap(),
                 });
+
+                // Assign address
+                region.assign_advice(
+                    || format!("address"),
+                    config.address,
+                    offset,
+                    || Ok(address),
+                )?;
 
                 Ok(())
             },
@@ -522,6 +554,12 @@ struct TxSignData {
     signature: (secp256k1::Fq, secp256k1::Fq),
     pub_key: Secp256k1Affine,
     msg_hash: secp256k1::Fq,
+}
+
+fn pub_key_hash_to_address<F: FieldExt>(pub_key_hash: &[u8]) -> F {
+    pub_key_hash[32 - 20..]
+        .iter()
+        .fold(F::zero(), |acc, b| acc * F::from(256) + F::from(*b as u64))
 }
 
 /*
@@ -627,7 +665,9 @@ mod sign_verify_tets {
         }
     }
 
-    const VERIF_HEIGHT: usize = 20_000;
+    // This offset comes from the "assign aux values" region.
+    const SIGN_VERIFY_OFFSET: usize = 250;
+    const VERIF_HEIGHT: usize = 1;
 
     fn run<F: FieldExt>(txs: Vec<TxSignData>) {
         let k = 20;
@@ -637,7 +677,12 @@ mod sign_verify_tets {
 
         let randomness = F::random(&mut rng);
         let mut power_of_randomness: Vec<Vec<F>> = (1..POW_RAND_SIZE + 1)
-            .map(|exp| vec![randomness.pow(&[exp as u64, 0, 0, 0]); txs.len() * VERIF_HEIGHT])
+            .map(|exp| {
+                vec![
+                    randomness.pow(&[exp as u64, 0, 0, 0]);
+                    SIGN_VERIFY_OFFSET + txs.len() * VERIF_HEIGHT
+                ]
+            })
             .collect();
         // SignVerifyChip -> ECDSAChip -> MainGate instance column
         power_of_randomness.push(vec![]);
@@ -705,6 +750,8 @@ mod sign_verify_tets {
         let (sk, pk) = gen_key_pair(&mut rng);
         let msg_hash = gen_msg_hash(&mut rng);
         let sig = sign(&mut rng, sk, msg_hash);
+        println!("DBG sk: {:#?}", sk);
+        println!("DBG pk: {:#?}", pk);
 
         let txs = vec![TxSignData {
             signature: sig,
@@ -717,3 +764,12 @@ mod sign_verify_tets {
         run::<Fr>(txs);
     }
 }
+
+// Vectors using `XorShiftRng::seed_from_u64(1)`
+// sk: 0x771bd7bf6c6414b9370bb8559d46e1cedb479b1836ea3c2e59a54c343b0d0495
+// pk: (
+//   0x8e31a3586d4c8de89d4e0131223ecfefa4eb76215f68a691ae607757d6256ede,
+//   0xc76fdd462294a7eeb8ff3f0f698eb470f32085ba975801dbe446ed8e0b05400b
+// )
+// pk_hash: d90e2e9d267cbcfd94de06fa7adbe6857c2c733025c0b8938a76beeefc85d6c7
+// addr: 0x7adbe6857c2c733025c0b8938a76beeefc85d6c7
