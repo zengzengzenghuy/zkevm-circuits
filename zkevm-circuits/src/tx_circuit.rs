@@ -25,6 +25,7 @@ use maingate::{
 };
 use pairing::arithmetic::FieldExt;
 use secp256k1::Secp256k1Affine;
+use std::cmp::min;
 use std::convert::TryInto;
 use std::{io::Cursor, marker::PhantomData, os::unix::prelude::FileTypeExt};
 
@@ -53,6 +54,35 @@ const KECCAK_INPUT_LEN: usize = 2;
 const KECCAK_OUTPUT_RLC: usize = 3;
 
 const BIT_LEN_LIMB: usize = 72;
+
+/// Return an expression that builds an integer element in the field from the
+/// `bytes` in little endian.
+fn int_from_bytes_le<'a, F: FieldExt>(
+    bytes: impl IntoIterator<Item = &'a Expression<F>>,
+) -> Expression<F> {
+    // sum_{i = 0}^{N} bytes[i] * 256^i
+    let mut res = 0u8.expr();
+    for (i, byte) in bytes.into_iter().enumerate() {
+        res = res + byte.clone() * Expression::Constant(F::from(256).pow(&[i as u64, 0, 0, 0]))
+    }
+    res
+}
+
+/// Return a list of expression that evaluate to 0 when the `bytes` are a little
+/// endian representation of the integer split into `limbs`.  Assumes `limbs`
+/// are 72 bits (9 bytes).
+fn integer_eq_bytes_le<F: FieldExt>(
+    limbs: &[Expression<F>; 4],
+    bytes: &[Expression<F>; 32],
+) -> Vec<Expression<F>> {
+    let mut res = Vec::new();
+    for (j, limb) in limbs.iter().enumerate() {
+        let limb_bytes = &bytes[j * 9..min((j + 1) * 9, bytes.len())];
+        let limb_exp = int_from_bytes_le(limb_bytes);
+        res.push(limb.clone() - limb_exp);
+    }
+    res
+}
 
 /// Enable copy constraint between `src` integer limbs and `dst` limbs.  Then
 /// assign the `dst` limbs values from `src`.
@@ -300,15 +330,42 @@ impl<F: FieldExt> SignVerifyChip<F> {
             let pub_key_hash = pub_key_hash.map(|c| meta.query_advice(c, Rotation::cur()));
             let address = meta.query_advice(address, Rotation::cur());
 
-            // addr_from_pk = \sum_{i = 0}^{20} pub_key_hash[32-i] * 256^i
-            let addr_from_pk = pub_key_hash[32 - 20..]
-                .iter()
-                .rev()
-                .zip((0..20).map(|i| F::from(256).pow(&[i, 0, 0, 0])))
-                .map(|(b, shift)| b.clone() * Expression::Constant(shift))
-                .fold(0u8.expr(), |acc, v| acc + v.clone());
+            let addr_from_pk = int_from_bytes_le(pub_key_hash[32 - 20..].iter().rev());
 
             vec![q_enable * (address - addr_from_pk)]
+        });
+
+        meta.create_gate("msg_hash in ECDSA equal their bytes", |meta| -> Vec<_> {
+            let q_enable = meta.query_selector(q_enable);
+            let msg_hash = msg_hash.map(|c| meta.query_advice(c, Rotation::cur()));
+            let msg_hash_limbs = msg_hash_limbs.map(|c| meta.query_advice(c, Rotation::cur()));
+
+            integer_eq_bytes_le(&msg_hash_limbs, &msg_hash)
+                .into_iter()
+                .map(|c| q_enable.clone() * c)
+                .collect()
+        });
+        meta.create_gate("pub_key x in ECDSA equal their bytes", |meta| -> Vec<_> {
+            let q_enable = meta.query_selector(q_enable);
+            let pub_key_x: [Column<Advice>; 32] = pub_key[..32].try_into().unwrap();
+            let pub_key_x = pub_key_x.map(|c| meta.query_advice(c.clone(), Rotation::cur()));
+            let pk_x_limbs = pk_x_limbs.map(|c| meta.query_advice(c, Rotation::cur()));
+
+            integer_eq_bytes_le(&pk_x_limbs, &pub_key_x)
+                .into_iter()
+                .map(|c| q_enable.clone() * c)
+                .collect()
+        });
+        meta.create_gate("pub_key y in ECDSA equal their bytes", |meta| -> Vec<_> {
+            let q_enable = meta.query_selector(q_enable);
+            let pub_key_y: [Column<Advice>; 32] = pub_key[32..].try_into().unwrap();
+            let pub_key_y = pub_key_y.map(|c| meta.query_advice(c.clone(), Rotation::cur()));
+            let pk_y_limbs = pk_y_limbs.map(|c| meta.query_advice(c, Rotation::cur()));
+
+            integer_eq_bytes_le(&pk_y_limbs, &pub_key_y)
+                .into_iter()
+                .map(|c| q_enable.clone() * c)
+                .collect()
         });
 
         // ECDSA config
@@ -514,6 +571,16 @@ impl<F: FieldExt> SignVerifyChip<F> {
                     offset,
                     || Ok(address),
                 )?;
+
+                // Assign msg_hash
+                for (i, byte) in msg_hash_le.iter().enumerate() {
+                    region.assign_advice(
+                        || format!("msg_hash byte {}", i),
+                        config.msg_hash[i],
+                        offset,
+                        || Ok(F::from(*byte as u64)),
+                    )?;
+                }
 
                 Ok(())
             },
