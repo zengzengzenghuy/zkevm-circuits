@@ -277,14 +277,20 @@ impl<F: FieldExt> SignVerifyChip<F> {
         let keccak_table = [(); 4].map(|_| meta.advice_column());
         // let pow_rand_cols = [(); POW_RAND_SIZE].map(|_| meta.instance_column());
 
+        let mut power_of_randomness_exp = None;
+        meta.create_gate("", |meta| {
+            power_of_randomness_exp = Some(
+                power_of_randomness.map(|column| meta.query_instance(column, Rotation::cur())),
+            );
+            [0u8.expr()]
+        });
+        let power_of_randomness_exp = power_of_randomness_exp.unwrap();
+
         // keccak lookup
         meta.lookup_any("keccak", |meta| {
             let q_enable = meta.query_selector(q_enable);
             let selector = q_enable * is_not_padding.clone();
             let mut table_map = Vec::new();
-
-            let power_of_randomness =
-                power_of_randomness.map(|c| meta.query_instance(c, Rotation::cur()));
 
             // Column 0: is_enabled
             let keccak_is_enabled =
@@ -299,7 +305,7 @@ impl<F: FieldExt> SignVerifyChip<F> {
             pub_key_be[32..].reverse();
             let pub_key_rlc = RandomLinearCombination::random_linear_combine_expr(
                 pub_key_be,
-                &power_of_randomness,
+                &power_of_randomness_exp,
             );
             // DBG
             // let pub_key_rlc = power_of_randomness[..31]
@@ -318,7 +324,7 @@ impl<F: FieldExt> SignVerifyChip<F> {
             let pub_key_hash = pub_key_hash.map(|c| meta.query_advice(c, Rotation::cur()));
             let pub_key_hash_rlc = RandomLinearCombination::random_linear_combine_expr(
                 pub_key_hash,
-                &power_of_randomness,
+                &power_of_randomness_exp,
             );
             table_map.push((selector.clone() * pub_key_hash_rlc, keccak_output_rlc));
 
@@ -366,6 +372,18 @@ impl<F: FieldExt> SignVerifyChip<F> {
                 .into_iter()
                 .map(|c| q_enable.clone() * c)
                 .collect()
+        });
+
+        meta.create_gate("msg_hash_rlc = RLC(msg_hash)", |meta| {
+            let q_enable = meta.query_selector(q_enable);
+            let msg_hash = msg_hash.map(|c| meta.query_advice(c, Rotation::cur()));
+            let msg_hash_rlc = meta.query_advice(msg_hash_rlc, Rotation::cur());
+
+            let expected_msg_hash_rlc = RandomLinearCombination::random_linear_combine_expr(
+                msg_hash,
+                &power_of_randomness_exp[..32],
+            );
+            vec![q_enable * (msg_hash_rlc - expected_msg_hash_rlc)]
         });
 
         // ECDSA config
