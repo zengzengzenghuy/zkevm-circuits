@@ -11,7 +11,8 @@ use halo2_proofs::{
     arithmetic::{BaseExt, CurveAffine},
     circuit::{AssignedCell, Layouter, Region, SimpleFloorPlanner},
     plonk::{
-        Advice, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, Selector, VirtualCells,
+        Advice, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, Instance, Selector,
+        VirtualCells,
     },
     poly::Rotation,
 };
@@ -114,7 +115,7 @@ struct SignVerifyConfig<F: FieldExt> {
     msg_hash: [Column<Advice>; 32],
     msg_hash_limbs: [Column<Advice>; 4],
     // signature: [[Column<Advice>; 32]; 2],
-    power_of_randomness: [Expression<F>; POW_RAND_SIZE],
+    power_of_randomness: [Column<Instance>; POW_RAND_SIZE],
 
     // [is_enabled, input_rlc, input_len, output_rlc]
     keccak_table: [Column<Advice>; 4],
@@ -210,16 +211,9 @@ impl<F: FieldExt> SignVerifyConfig<F> {
 impl<F: FieldExt> SignVerifyChip<F> {
     pub fn configure(
         meta: &mut ConstraintSystem<F>,
-        power_of_randomness: [Expression<F>; POW_RAND_SIZE],
+        power_of_randomness: [Column<Instance>; POW_RAND_SIZE],
     ) -> SignVerifyConfig<F> {
         let q_enable = meta.complex_selector();
-        // ECDSA config
-        let (rns_base, rns_scalar) = GeneralEccChip::<Secp256k1Affine, F>::rns(BIT_LEN_LIMB);
-        let main_gate_config = MainGate::<F>::configure(meta);
-        let mut overflow_bit_lengths: Vec<usize> = vec![];
-        overflow_bit_lengths.extend(rns_base.overflow_lengths());
-        overflow_bit_lengths.extend(rns_scalar.overflow_lengths());
-        let range_config = RangeChip::<F>::configure(meta, &main_gate_config, overflow_bit_lengths);
 
         let pub_key = [(); 32 * 2].map(|_| meta.advice_column());
         let pk_x_limbs = [(); 4].map(|_| meta.advice_column());
@@ -251,12 +245,16 @@ impl<F: FieldExt> SignVerifyChip<F> {
         // lookup keccak table
 
         let keccak_table = [(); 4].map(|_| meta.advice_column());
+        // let pow_rand_cols = [(); POW_RAND_SIZE].map(|_| meta.instance_column());
 
         // keccak lookup
         meta.lookup_any("keccak", |meta| {
             let q_enable = meta.query_selector(q_enable);
             let selector = q_enable * is_not_padding.clone();
             let mut table_map = Vec::new();
+
+            let power_of_randomness =
+                power_of_randomness.map(|c| meta.query_instance(c, Rotation::cur()));
 
             // Column 0: is_enabled
             let keccak_is_enabled =
@@ -273,6 +271,10 @@ impl<F: FieldExt> SignVerifyChip<F> {
                 pub_key_be,
                 &power_of_randomness,
             );
+            // DBG
+            // let pub_key_rlc = power_of_randomness[..31]
+            //     .iter()
+            //     .fold(0.expr(), |acc, val| acc * 256.expr() + val.clone());
             table_map.push((selector.clone() * pub_key_rlc, keccak_input_rlc));
 
             // Column 2: input_len (64)
@@ -292,6 +294,14 @@ impl<F: FieldExt> SignVerifyChip<F> {
 
             table_map
         });
+
+        // ECDSA config
+        let (rns_base, rns_scalar) = GeneralEccChip::<Secp256k1Affine, F>::rns(BIT_LEN_LIMB);
+        let main_gate_config = MainGate::<F>::configure(meta);
+        let mut overflow_bit_lengths: Vec<usize> = vec![];
+        overflow_bit_lengths.extend(rns_base.overflow_lengths());
+        overflow_bit_lengths.extend(rns_scalar.overflow_lengths());
+        let range_config = RangeChip::<F>::configure(meta, &main_gate_config, overflow_bit_lengths);
 
         SignVerifyConfig {
             q_enable,
@@ -351,8 +361,9 @@ impl<F: FieldExt> SignVerifyChip<F> {
         layouter.assign_region(
             || "signature verify + ecdsa chip verification witness",
             |mut region| {
-                let offset = &mut 0;
-                let ctx = &mut RegionCtx::new(&mut region, offset);
+                let mut offset = 0;
+                let ctx_offset = &mut 0;
+                let ctx = &mut RegionCtx::new(&mut region, ctx_offset);
 
                 {
                     let integer_r = ecc_chip.new_unassigned_scalar(Some(sig_r));
@@ -373,7 +384,6 @@ impl<F: FieldExt> SignVerifyChip<F> {
                     let msg_hash = scalar_chip.assign_integer(ctx, msg_hash)?;
                     ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
 
-                    let offset = 0;
                     // Copy constraint between ecdsa verification integers and local columns
                     // copy_integer(&mut region, "sig_r", sig.r, &config.sig_r_limbs, offset)?;
                     // copy_integer(&mut region, "sig_s", sig.s, &config.sig_s_limbs, offset)?;
@@ -400,7 +410,7 @@ impl<F: FieldExt> SignVerifyChip<F> {
                     )?;
                 }
 
-                config.q_enable.enable(&mut region, *offset)?;
+                config.q_enable.enable(&mut region, offset)?;
 
                 // Assign msg_hash_rlc & msg_hash_rlc_is_zero gadget
                 let mut msg_hash_le = [0u8; 32];
@@ -411,10 +421,10 @@ impl<F: FieldExt> SignVerifyChip<F> {
                 region.assign_advice(
                     || format!("msg_hash_rlc"),
                     config.msg_hash_rlc,
-                    *offset,
+                    offset,
                     || Ok(msg_hash_rlc),
                 )?;
-                msg_hash_rlc_is_zero_chip.assign(&mut region, *offset, Some(msg_hash_rlc))?;
+                msg_hash_rlc_is_zero_chip.assign(&mut region, offset, Some(msg_hash_rlc))?;
 
                 // Assign pub_key
                 let pk_coord = pk.coordinates().unwrap();
@@ -429,18 +439,20 @@ impl<F: FieldExt> SignVerifyChip<F> {
                     .write(&mut Cursor::new(&mut pk_y_le[..]))
                     .unwrap();
                 for (i, byte) in pk_x_le.iter().enumerate() {
+                    // println!("DBG pk x {:02} = {:02x}", i, byte);
                     region.assign_advice(
                         || format!("pub_key x byte {}", i),
                         config.pub_key[i],
-                        *offset,
+                        offset,
                         || Ok(F::from(*byte as u64)),
                     )?;
                 }
                 for (i, byte) in pk_y_le.iter().enumerate() {
+                    // println!("DBG pk y {:02} = {:02x}", i, byte);
                     region.assign_advice(
                         || format!("pub_key y byte {}", i),
                         config.pub_key[32 + i],
-                        *offset,
+                        offset,
                         || Ok(F::from(*byte as u64)),
                     )?;
                 }
@@ -461,7 +473,7 @@ impl<F: FieldExt> SignVerifyChip<F> {
                     region.assign_advice(
                         || format!("pub_key_hash byte {}", i),
                         config.pub_key_hash[i],
-                        *offset,
+                        offset,
                         || Ok(F::from(*byte as u64)),
                     )?;
                 }
@@ -544,17 +556,20 @@ mod sign_verify_tets {
     impl<F: FieldExt> TestCircuitSignVerifyConfig<F> {
         pub fn new(meta: &mut ConstraintSystem<F>) -> Self {
             let power_of_randomness = {
-                let columns = [(); POW_RAND_SIZE].map(|_| meta.instance_column());
-                let mut power_of_randomness = None;
+                [(); POW_RAND_SIZE].map(|_| meta.instance_column())
+                // let columns = [(); POW_RAND_SIZE].map(|_|
+                // meta.instance_column());
+                // let mut power_of_randomness = None;
 
-                meta.create_gate("power of randomness", |meta| {
-                    power_of_randomness =
-                        Some(columns.map(|column| meta.query_instance(column, Rotation::cur())));
+                // meta.create_gate("power of randomness", |meta| {
+                //     power_of_randomness =
+                //         Some(columns.map(|column| meta.query_instance(column,
+                // Rotation::cur())));
 
-                    [0.expr()]
-                });
+                //     [0.expr()]
+                // });
 
-                power_of_randomness.unwrap()
+                // power_of_randomness.unwrap()
             };
 
             let sign_verify = SignVerifyChip::configure(meta, power_of_randomness);
@@ -612,7 +627,7 @@ mod sign_verify_tets {
         }
     }
 
-    const VERIF_HEIGHT: usize = 1;
+    const VERIF_HEIGHT: usize = 20_000;
 
     fn run<F: FieldExt>(txs: Vec<TxSignData>) {
         let k = 20;
@@ -626,6 +641,7 @@ mod sign_verify_tets {
             .collect();
         // SignVerifyChip -> ECDSAChip -> MainGate instance column
         power_of_randomness.push(vec![]);
+        // println!("DBG power_of_randomness: {:?}", power_of_randomness);
         let circuit = TestCircuitSignVerify::<F> {
             sign_verify: SignVerifyChip {
                 aux_generator,
