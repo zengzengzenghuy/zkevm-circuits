@@ -31,9 +31,7 @@ use std::{io::Cursor, marker::PhantomData, os::unix::prelude::FileTypeExt};
 
 // TODO: Move these utils outside of `evm_circuit` so that they can be used by
 // other circuits without crossing boundaries.
-use crate::evm_circuit::util::{
-    and, constraint_builder::BaseConstraintBuilder, not, or, select, RandomLinearCombination, Word,
-};
+use crate::evm_circuit::util::{and, not, or, select, RandomLinearCombination, Word};
 use crate::util::Expr;
 
 const POW_RAND_SIZE: usize = 63;
@@ -166,6 +164,31 @@ impl<F: FieldExt> SignVerifyConfig<F> {
         Ok(())
     }
 
+    fn keccak_assign_row(
+        &self,
+        region: &mut Region<'_, F>,
+        offset: usize,
+        is_enabled: F,
+        input_rlc: F,
+        input_len: usize,
+        output_rlc: F,
+    ) -> Result<(), Error> {
+        for (name, column, value) in &[
+            ("is_enabled", self.keccak_table[0], is_enabled),
+            ("input_rlc", self.keccak_table[1], input_rlc),
+            ("input_len", self.keccak_table[2], F::from(input_len as u64)),
+            ("output_rlc", self.keccak_table[3], output_rlc),
+        ] {
+            region.assign_advice(
+                || format!("Keccak table assign {} {}", name, offset),
+                *column,
+                offset,
+                || Ok(*value),
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn load_keccak(
         &self,
         layouter: &mut impl Layouter<F>,
@@ -178,19 +201,7 @@ impl<F: FieldExt> SignVerifyConfig<F> {
                 let mut offset = 0;
 
                 // All zero row to allow simulating a disabled lookup.
-                for (name, column, value) in &[
-                    ("is_enabled", self.keccak_table[0], F::zero()),
-                    ("input_rlc", self.keccak_table[1], F::zero()),
-                    ("input_len", self.keccak_table[2], F::zero()),
-                    ("output_rlc", self.keccak_table[3], F::zero()),
-                ] {
-                    region.assign_advice(
-                        || format!("Keccak table assign {} {}", name, offset),
-                        *column,
-                        offset,
-                        || Ok(*value),
-                    )?;
-                }
+                self.keccak_assign_row(&mut region, offset, F::zero(), F::zero(), 0, F::zero())?;
                 offset += 1;
 
                 for aux in &auxs {
@@ -204,23 +215,14 @@ impl<F: FieldExt> SignVerifyConfig<F> {
                     //     input.len(),
                     //     output_rlc
                     // );
-                    for (name, column, value) in &[
-                        ("is_enabled", self.keccak_table[0], F::one()),
-                        ("input_rlc", self.keccak_table[1], input_rlc),
-                        (
-                            "input_len",
-                            self.keccak_table[2],
-                            F::from(input.len() as u64),
-                        ),
-                        ("output_rlc", self.keccak_table[3], output_rlc),
-                    ] {
-                        region.assign_advice(
-                            || format!("Keccak table assign {} {}", name, offset),
-                            *column,
-                            offset,
-                            || Ok(*value),
-                        )?;
-                    }
+                    self.keccak_assign_row(
+                        &mut region,
+                        offset,
+                        F::one(),
+                        input_rlc,
+                        input.len(),
+                        output_rlc,
+                    )?;
                     offset += 1;
                 }
                 Ok(())
@@ -415,10 +417,10 @@ impl<F: FieldExt> SignVerifyChip<F> {
 
     pub fn assign(
         &self,
-        config: SignVerifyConfig<F>,
-        mut layouter: impl Layouter<F>,
+        config: &SignVerifyConfig<F>,
+        layouter: &mut impl Layouter<F>,
         randomness: F,
-        txs: &[TxSignData],
+        tx: TxSignData,
     ) -> Result<(), Error> {
         let mut ecc_chip =
             GeneralEccChip::<Secp256k1Affine, F>::new(config.ecc_chip_config(), BIT_LEN_LIMB);
@@ -429,7 +431,7 @@ impl<F: FieldExt> SignVerifyChip<F> {
             signature,
             pub_key,
             msg_hash,
-        } = txs[0];
+        } = tx;
         let (sig_r, sig_s) = signature;
         let pk = pub_key;
 
@@ -451,61 +453,73 @@ impl<F: FieldExt> SignVerifyChip<F> {
         let ecdsa_chip = EcdsaChip::new(ecc_chip.clone());
         let msg_hash_rlc_is_zero_chip = IsZeroChip::construct(config.msg_hash_rlc_is_zero.clone());
 
+        let mut pk_x_assigned = None;
+        let mut pk_y_assigned = None;
+        let mut msg_hash_assigned = None;
         let mut keccak_auxs = Vec::new();
+
         layouter.assign_region(
-            || "signature verify + ecdsa chip verification witness",
+            || "ecdsa chip verification witness",
             |mut region| {
-                let mut offset = 0;
                 let ctx_offset = &mut 0;
                 let ctx = &mut RegionCtx::new(&mut region, ctx_offset);
 
-                {
-                    let integer_r = ecc_chip.new_unassigned_scalar(Some(sig_r));
-                    let integer_s = ecc_chip.new_unassigned_scalar(Some(sig_s));
-                    let msg_hash = ecc_chip.new_unassigned_scalar(Some(msg_hash));
+                let integer_r = ecc_chip.new_unassigned_scalar(Some(sig_r));
+                let integer_s = ecc_chip.new_unassigned_scalar(Some(sig_s));
+                let msg_hash = ecc_chip.new_unassigned_scalar(Some(msg_hash));
 
-                    let r_assigned = scalar_chip.assign_integer(ctx, integer_r)?;
-                    let s_assigned = scalar_chip.assign_integer(ctx, integer_s)?;
-                    let sig = AssignedEcdsaSig {
-                        r: r_assigned,
-                        s: s_assigned,
-                    };
+                let r_assigned = scalar_chip.assign_integer(ctx, integer_r)?;
+                let s_assigned = scalar_chip.assign_integer(ctx, integer_s)?;
+                let sig = AssignedEcdsaSig {
+                    r: r_assigned,
+                    s: s_assigned,
+                };
 
-                    let pk_in_circuit = ecc_chip.assign_point(ctx, Some(pk.into()))?;
-                    let pk_assigned = AssignedPublicKey {
-                        point: pk_in_circuit,
-                    };
-                    let msg_hash = scalar_chip.assign_integer(ctx, msg_hash)?;
-                    ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
+                let pk_in_circuit = ecc_chip.assign_point(ctx, Some(pk.into()))?;
+                let pk_assigned = AssignedPublicKey {
+                    point: pk_in_circuit,
+                };
+                let msg_hash = scalar_chip.assign_integer(ctx, msg_hash)?;
+                ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
 
-                    // Copy constraint between ecdsa verification integers and local columns
-                    // copy_integer(&mut region, "sig_r", sig.r, &config.sig_r_limbs, offset)?;
-                    // copy_integer(&mut region, "sig_s", sig.s, &config.sig_s_limbs, offset)?;
-                    copy_integer(
-                        &mut region,
-                        "pk_x",
-                        pk_assigned.point.get_x(),
-                        &config.pk_x_limbs,
-                        offset,
-                    )?;
-                    copy_integer(
-                        &mut region,
-                        "pk_y",
-                        pk_assigned.point.get_y(),
-                        &config.pk_y_limbs,
-                        offset,
-                    )?;
-                    copy_integer(
-                        &mut region,
-                        "msg_hash",
-                        msg_hash,
-                        &config.msg_hash_limbs,
-                        offset,
-                    )?;
+                // Copy constraint between ecdsa verification integers and local columns
+                // copy_integer(&mut region, "sig_r", sig.r, &config.sig_r_limbs, offset)?;
+                // copy_integer(&mut region, "sig_s", sig.s, &config.sig_s_limbs, offset)?;
+                pk_x_assigned = Some(pk_assigned.point.get_x());
+                pk_y_assigned = Some(pk_assigned.point.get_y());
+                msg_hash_assigned = Some(msg_hash);
 
-                    println!("DBG ctx_offset = {}", *ctx_offset);
-                }
+                println!("DBG ctx_offset = {}", *ctx_offset);
 
+                Ok(())
+            },
+        )?;
+
+        layouter.assign_region(
+            || "signature verify witness",
+            |mut region| {
+                let offset = 0;
+                copy_integer(
+                    &mut region,
+                    "pk_x",
+                    pk_x_assigned.clone().unwrap(),
+                    &config.pk_x_limbs,
+                    offset,
+                )?;
+                copy_integer(
+                    &mut region,
+                    "pk_y",
+                    pk_y_assigned.clone().unwrap(),
+                    &config.pk_y_limbs,
+                    offset,
+                )?;
+                copy_integer(
+                    &mut region,
+                    "msg_hash",
+                    msg_hash_assigned.clone().unwrap(),
+                    &config.msg_hash_limbs,
+                    offset,
+                )?;
                 config.q_enable.enable(&mut region, offset)?;
 
                 // Assign msg_hash_rlc & msg_hash_rlc_is_zero gadget
@@ -604,8 +618,8 @@ impl<F: FieldExt> SignVerifyChip<F> {
             },
         )?;
 
-        config.load_keccak(&mut layouter, keccak_auxs, randomness)?;
-        config.load_range(&mut layouter)?;
+        config.load_keccak(layouter, keccak_auxs, randomness)?;
+        config.load_range(layouter)?;
 
         Ok(())
     }
@@ -635,6 +649,7 @@ impl<F: FieldExt> SignVerifyChip<F> {
     */
 }
 
+#[derive(Clone, Debug)]
 struct TxSignData {
     signature: (secp256k1::Fq, secp256k1::Fq),
     pub_key: Secp256k1Affine,
@@ -698,22 +713,6 @@ mod sign_verify_tets {
             let sign_verify = SignVerifyChip::configure(meta, power_of_randomness);
             TestCircuitSignVerifyConfig { sign_verify }
         }
-
-        // pub fn ecc_chip_config(&self) -> EccConfig {
-        //     EccConfig::new(self.range_config.clone(), self.main_gate_config.clone())
-        // }
-
-        // pub fn config_range<F: FieldExt>(
-        //     &self,
-        //     layouter: &mut impl Layouter<F>,
-        // ) -> Result<(), Error> {
-        //     let bit_len_lookup = BIT_LEN_LIMB / NUMBER_OF_LOOKUP_LIMBS;
-        //     let range_chip = RangeChip::<F>::new(self.range_config.clone(),
-        // bit_len_lookup);     range_chip.load_limb_range_table(layouter)?;
-        //     range_chip.load_overflow_range_tables(layouter)?;
-
-        //     Ok(())
-        // }
     }
 
     #[derive(Default)]
@@ -722,10 +721,6 @@ mod sign_verify_tets {
         randomness: F,
         // power_of_randomness: [Expression<F>; POW_RAND_SIZE],
         txs: Vec<TxSignData>,
-        /* aux_generator: Secp256k1Affine,
-         * window_size: usize,
-         * txs: Vec<TxSignData>,
-         * _marker: PhantomData<F>, */
     }
 
     impl<F: FieldExt> Circuit<F> for TestCircuitSignVerify<F> {
@@ -743,10 +738,21 @@ mod sign_verify_tets {
         fn synthesize(
             &self,
             config: Self::Config,
-            layouter: impl Layouter<F>,
+            mut layouter: impl Layouter<F>,
         ) -> Result<(), Error> {
-            self.sign_verify
-                .assign(config.sign_verify, layouter, self.randomness, &self.txs)
+            self.sign_verify.assign(
+                &config.sign_verify,
+                &mut layouter,
+                self.randomness,
+                self.txs[0].clone(),
+            )?;
+            // self.sign_verify.assign(
+            //     &config.sign_verify,
+            //     &mut layouter,
+            //     self.randomness,
+            //     self.txs[1].clone(),
+            // )?;
+            Ok(())
         }
     }
 
@@ -765,7 +771,7 @@ mod sign_verify_tets {
             .map(|exp| {
                 vec![
                     randomness.pow(&[exp as u64, 0, 0, 0]);
-                    SIGN_VERIFY_OFFSET + txs.len() * VERIF_HEIGHT
+                    txs.len() * (VERIF_HEIGHT + SIGN_VERIFY_OFFSET)
                 ]
             })
             .collect();
@@ -832,17 +838,20 @@ mod sign_verify_tets {
     #[test]
     fn test_sign_verify() {
         let mut rng = XorShiftRng::seed_from_u64(1);
-        let (sk, pk) = gen_key_pair(&mut rng);
-        let msg_hash = gen_msg_hash(&mut rng);
-        let sig = sign(&mut rng, sk, msg_hash);
-        println!("DBG sk: {:#?}", sk);
-        println!("DBG pk: {:#?}", pk);
-
-        let txs = vec![TxSignData {
-            signature: sig,
-            pub_key: pk,
-            msg_hash: msg_hash,
-        }];
+        const NUM_TXS: usize = 1;
+        let mut txs = Vec::new();
+        for _ in 0..NUM_TXS {
+            let (sk, pk) = gen_key_pair(&mut rng);
+            let msg_hash = gen_msg_hash(&mut rng);
+            let sig = sign(&mut rng, sk, msg_hash);
+            println!("DBG sk: {:#?}", sk);
+            println!("DBG pk: {:#?}", pk);
+            txs.push(TxSignData {
+                signature: sig,
+                pub_key: pk,
+                msg_hash,
+            });
+        }
 
         // generate a valid signature
 
