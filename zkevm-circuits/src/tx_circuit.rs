@@ -21,6 +21,7 @@ use integer::{
     NUMBER_OF_LOOKUP_LIMBS,
 };
 use keccak256::plain::Keccak;
+use lazy_static::lazy_static;
 use maingate::{
     Assigned, AssignedCondition, MainGate, MainGateConfig, RangeChip, RangeConfig,
     RangeInstructions, RegionCtx,
@@ -146,7 +147,6 @@ struct SignVerifyConfig<F: FieldExt> {
     pk_y_limbs: [Column<Advice>; 4],
     msg_hash: [Column<Advice>; 32],
     msg_hash_limbs: [Column<Advice>; 4],
-    ecdsa_result: Column<Advice>,
     // signature: [[Column<Advice>; 32]; 2],
     power_of_randomness: [Column<Instance>; POW_RAND_SIZE],
 
@@ -169,8 +169,6 @@ impl<F: FieldExt> SignVerifyConfig<F> {
         let msg_hash = [(); 32].map(|_| meta.advice_column());
         let msg_hash_limbs = [(); 4].map(|_| meta.advice_column());
         msg_hash_limbs.map(|c| meta.enable_equality(c));
-        let ecdsa_result = meta.advice_column();
-        meta.enable_equality(ecdsa_result);
 
         // create address, msg_hash, pk_hash, and msg_hash_inv, and iz_zero
 
@@ -247,12 +245,6 @@ impl<F: FieldExt> SignVerifyConfig<F> {
             table_map.push((selector.clone() * pk_hash_rlc, keccak_output_rlc));
 
             table_map
-        });
-
-        meta.create_gate("when not_padding, ecdsa_result = true", |meta| {
-            let q_enable = meta.query_selector(q_enable);
-            let ecdsa_result = meta.query_advice(ecdsa_result, Rotation::cur());
-            vec![q_enable * (is_not_padding.clone() - ecdsa_result)]
         });
 
         meta.create_gate("address is is_not_padding * pk_hash[-20:]", |meta| {
@@ -332,7 +324,6 @@ impl<F: FieldExt> SignVerifyConfig<F> {
             pk_y_limbs,
             msg_hash,
             msg_hash_limbs,
-            ecdsa_result,
             power_of_randomness,
             keccak_table,
         }
@@ -434,7 +425,6 @@ pub struct AssignedECDSA<F: FieldExt> {
     pk_x: AssignedInteger<secp256k1::Fp, F>,
     pk_y: AssignedInteger<secp256k1::Fp, F>,
     msg_hash: AssignedInteger<secp256k1::Fq, F>,
-    result: AssignedCondition<F>,
 }
 
 pub struct AssignedSignatureVerify<F: FieldExt> {
@@ -491,7 +481,7 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             point: pk_in_circuit,
         };
         let msg_hash = scalar_chip.assign_integer(ctx, msg_hash)?;
-        let result = ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
+        ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
 
         // Copy constraint between ecdsa verification integers and local columns
         // copy_integer(&mut region, "sig_r", sig.r, &config.sig_r_limbs, offset)?;
@@ -501,7 +491,6 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             pk_x: pk_assigned.point.get_x(),
             pk_y: pk_assigned.point.get_y(),
             msg_hash,
-            result,
         })
     }
 
@@ -512,6 +501,7 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         offset: usize,
         address_is_zero_chip: &IsZeroChip<F>,
         randomness: F,
+        padding: bool,
         tx: &TxSignData,
         assigned_ecdsa: &AssignedECDSA<F>,
     ) -> Result<(AssignedSignatureVerify<F>, KeccakAux), Error> {
@@ -542,13 +532,6 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             &config.msg_hash_limbs,
             offset,
         )?;
-        let ecdsa_result_assigned = region.assign_advice(
-            || format!("ECDSA verify result"),
-            config.ecdsa_result,
-            offset,
-            || assigned_ecdsa.result.value().ok_or(Error::Synthesis),
-        )?;
-        region.constrain_equal(ecdsa_result_assigned.cell(), assigned_ecdsa.result.cell())?;
 
         config.q_enable.enable(region, offset)?;
 
@@ -558,6 +541,7 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             .write(&mut Cursor::new(&mut msg_hash_le[..]))
             .unwrap();
         let msg_hash_rlc = Word::random_linear_combine(msg_hash_le, randomness);
+        let msg_hash_rlc = if !padding { msg_hash_rlc } else { F::zero() };
         let msg_hash_rlc_assigned = region.assign_advice(
             || format!("msg_hash_rlc"),
             config.msg_hash_rlc,
@@ -603,13 +587,9 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         let mut pk_bytes_be = [0u8; 64];
         pk_bytes_be[..32].copy_from_slice(&pk_x_be);
         pk_bytes_be[32..].copy_from_slice(&pk_y_be);
-        let pk_hash = if *msg_hash == secp256k1::Fq::one() {
-            vec![0u8; 32] // Enable padding with address = 0
-        } else {
-            let mut keccak = Keccak::default();
-            keccak.update(&pk_bytes_be);
-            keccak.digest()
-        };
+        let mut keccak = Keccak::default();
+        keccak.update(&pk_bytes_be);
+        let pk_hash = keccak.digest();
         println!("DBG pk_hash: {:x?}", pk_hash);
         let address = pub_key_hash_to_address(&pk_hash);
         println!("DBG address: {:?}", address);
@@ -624,6 +604,7 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             )?;
         }
 
+        let address = if !padding { address } else { F::zero() };
         // Assign address and address_is_zero_chip
         let address_assigned = region.assign_advice(
             || format!("address"),
@@ -708,11 +689,11 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             |mut region| {
                 let mut offset = 0;
                 for i in 0..MAX_VERIF {
-                    let tx = if i < txs.len() {
-                        txs[i].clone()
+                    let (padding, tx) = if i < txs.len() {
+                        (false, txs[i].clone())
                     } else {
-                        // pading (enabled when msg_hash == 0)
-                        TxSignData::default()
+                        // pading (enabled when address == 0)
+                        (true, TxSignData::default())
                     };
                     let assigned_ecdsa = &assigned_ecdsas[i];
                     let (_, keccak_aux) = self.assign_signature_verify(
@@ -721,6 +702,7 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
                         offset,
                         &address_is_zero_chip,
                         randomness,
+                        padding,
                         &tx,
                         assigned_ecdsa,
                     )?;
@@ -772,29 +754,54 @@ struct TxSignData {
     msg_hash: secp256k1::Fq,
 }
 
+// Returns (r, s)
+fn sign(
+    randomness: secp256k1::Fq,
+    sk: secp256k1::Fq,
+    msg_hash: secp256k1::Fq,
+) -> (secp256k1::Fq, secp256k1::Fq) {
+    let randomness_inv = randomness.invert().unwrap();
+    let generator = Secp256k1Affine::generator();
+    let sig_point = generator * randomness;
+    let x = sig_point.to_affine().coordinates().unwrap().x().clone();
+
+    let x_repr = &mut Vec::with_capacity(32);
+    x.write(x_repr).unwrap();
+
+    let mut x_bytes = [0u8; 64];
+    x_bytes[..32].copy_from_slice(&x_repr[..]);
+
+    let sig_r = secp256k1::Fq::from_bytes_wide(&x_bytes); // get x cordinate (E::Base) on E::Scalar
+    let sig_s = randomness_inv * (msg_hash + sig_r * sk);
+    (sig_r, sig_s)
+}
+
+lazy_static! {
+    static ref TX_SIGN_DATA_DEFAULT: TxSignData = {
+        let generator = Secp256k1Affine::generator();
+        let sk = secp256k1::Fq::one();
+        let pk = generator * sk;
+        let pk = pk.to_affine();
+        let msg_hash = secp256k1::Fq::one();
+        let randomness = secp256k1::Fq::one();
+        let (sig_r, sig_s) = sign(randomness, sk, msg_hash);
+
+        TxSignData {
+            signature: (sig_r, sig_s),
+            pk,
+            msg_hash,
+        }
+    };
+}
+
 impl Default for TxSignData {
     fn default() -> Self {
-        Self {
-            // Hardcoded signature (r, s) values that make the ECDSA chip pass the constraints, to
-            // use for the case where we don't want to do the verification in a padding
-            // verification.
-            signature: (
-                secp256k1::Fq::from_raw([
-                    0x21a1e47cdca2154d,
-                    0x2df430adafa747ad,
-                    0xa95cf188e4147bc5,
-                    0xce4d6d14ce9b6c24,
-                ]),
-                secp256k1::Fq::from_raw([
-                    0x3d18180571923957,
-                    0x59a31324f3d31663,
-                    0xb0650a05780d8b36,
-                    0xd5a692e5f8f736ac,
-                ]),
-            ),
-            pk: Secp256k1Affine::generator(),
-            msg_hash: secp256k1::Fq::one(),
-        }
+        // Hardcoded valid signature corresponding to a hardcoded private key and
+        // message hash generated from "nothing up my sleeve" values to make the
+        // ECDSA chip pass the constraints, to be use for padding signature
+        // verifications (where the constraints pass, but we don't care about the
+        // message hash and public key).
+        TX_SIGN_DATA_DEFAULT.clone()
     }
 }
 
@@ -948,26 +955,13 @@ mod sign_verify_tets {
     }
 
     // Returns (r, s)
-    fn sign(
+    fn sign_with_rng(
         rng: impl RngCore,
         sk: secp256k1::Fq,
         msg_hash: secp256k1::Fq,
     ) -> (secp256k1::Fq, secp256k1::Fq) {
-        let randomness = <Secp256k1Affine as CurveAffine>::ScalarExt::random(rng);
-        let randomness_inv = randomness.invert().unwrap();
-        let generator = <Secp256k1Affine as PrimeCurveAffine>::generator();
-        let sig_point = generator * randomness;
-        let x = sig_point.to_affine().coordinates().unwrap().x().clone();
-
-        let x_repr = &mut Vec::with_capacity(32);
-        x.write(x_repr).unwrap();
-
-        let mut x_bytes = [0u8; 64];
-        x_bytes[..32].copy_from_slice(&x_repr[..]);
-
-        let x_bytes_on_n = <Secp256k1Affine as CurveAffine>::ScalarExt::from_bytes_wide(&x_bytes); // get x cordinate (E::Base) on E::Scalar
-        let sig_s = randomness_inv * (msg_hash + x_bytes_on_n * sk);
-        (x_bytes_on_n, sig_s)
+        let randomness = secp256k1::Fq::random(rng);
+        sign(randomness, sk, msg_hash)
     }
 
     #[test]
@@ -979,7 +973,7 @@ mod sign_verify_tets {
         for _ in 0..NUM_TXS {
             let (sk, pk) = gen_key_pair(&mut rng);
             let msg_hash = gen_msg_hash(&mut rng);
-            let sig = sign(&mut rng, sk, msg_hash);
+            let sig = sign_with_rng(&mut rng, sk, msg_hash);
             println!("DBG sk: {:#?}", sk);
             println!("DBG pk: {:#?}", pk);
             txs.push(TxSignData {
