@@ -24,7 +24,7 @@ use keccak256::plain::Keccak;
 use lazy_static::lazy_static;
 use maingate::{
     Assigned, AssignedCondition, MainGate, MainGateConfig, RangeChip, RangeConfig,
-    RangeInstructions, RegionCtx,
+    RangeInstructions, RegionCtx, UnassignedValue,
 };
 use pairing::arithmetic::FieldExt;
 use secp256k1::Secp256k1Affine;
@@ -450,7 +450,9 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
     pub fn assign_ecdsa(
         &self,
         ctx: &mut RegionCtx<F>,
-        ecc_chip: &mut GeneralEccChip<Secp256k1Affine, F>,
+        main_gate: &MainGate<F>,
+        range_chip: &RangeChip<F>,
+        ecc_chip: &GeneralEccChip<Secp256k1Affine, F>,
         scalar_chip: &IntegerChip<secp256k1::Fq, F>,
         ecdsa_chip: &EcdsaChip<Secp256k1Affine, F>,
         tx: &TxSignData,
@@ -462,8 +464,40 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         } = tx;
         let (sig_r, sig_s) = signature;
 
-        // let ctx_offset = &mut 0;
-        // let ctx = &mut RegionCtx::new(region, ctx_offset);
+        let mut msg_hash_le = [0u8; 32];
+        msg_hash
+            .write(&mut Cursor::new(&mut msg_hash_le[..]))
+            .unwrap();
+        let msg_hash_le = msg_hash_le.map(|b| {
+            range_chip.range_value(ctx, &UnassignedValue::from(Some(F::from(b as u64))), 8)
+        });
+        let pk_coord = pk.coordinates().unwrap();
+        let mut pk_x_le = [0u8; 32];
+        let mut pk_y_le = [0u8; 32];
+        pk_coord
+            .x()
+            .write(&mut Cursor::new(&mut pk_x_le[..]))
+            .unwrap();
+        pk_coord
+            .y()
+            .write(&mut Cursor::new(&mut pk_y_le[..]))
+            .unwrap();
+        let pk_x_le = pk_x_le.map(|b| {
+            range_chip.range_value(ctx, &UnassignedValue::from(Some(F::from(b as u64))), 8)
+        });
+        let pk_y_le = pk_y_le.map(|b| {
+            range_chip.range_value(ctx, &UnassignedValue::from(Some(F::from(b as u64))), 8)
+        });
+
+        // TODO: Using the following `main_gate` functions: `assign_constant`, `mul`,
+        // `add` and `assert_equal`, constraint the following for `msg_hash`,
+        // `pk_x` and `pk_y`: `limb_i = \sum_{j=0}^8 byte_{i*9 + j} * 256^i`.
+        // Then return the bytes in AssignedECDSA instead of the limbs, and do copy
+        // constraints over the bytes.
+
+        // TODO: Update once halo2wrong suports the following methods:
+        // - `IntegerChip::assign_integer_from_bytes_le`
+        // - `GeneralEccChip::assing_point_from_bytes_le`
 
         let integer_r = ecc_chip.new_unassigned_scalar(Some(*sig_r));
         let integer_s = ecc_chip.new_unassigned_scalar(Some(*sig_s));
@@ -482,10 +516,6 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         };
         let msg_hash = scalar_chip.assign_integer(ctx, msg_hash)?;
         ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
-
-        // Copy constraint between ecdsa verification integers and local columns
-        // copy_integer(&mut region, "sig_r", sig.r, &config.sig_r_limbs, offset)?;
-        // copy_integer(&mut region, "sig_s", sig.s, &config.sig_s_limbs, offset)?;
 
         Ok(AssignedECDSA {
             pk_x: pk_assigned.point.get_x(),
@@ -646,6 +676,10 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         if txs.len() > MAX_VERIF {
             panic!("txs.len() = {} > MAX_VERIF = {}", txs.len(), MAX_VERIF);
         }
+        let main_gate = MainGate::new(config.main_gate_config.clone());
+        // TODO: Figure out the best value for RangeChip base_bit_len, when we want to
+        // range on 8 bits.
+        let range_chip = RangeChip::new(config.range_config.clone(), 10);
         let mut ecc_chip =
             GeneralEccChip::<Secp256k1Affine, F>::new(config.ecc_chip_config(), BIT_LEN_LIMB);
         let scalar_chip = ecc_chip.scalar_field_chip();
@@ -675,8 +709,15 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
                         // pading (enabled when msg_hash == 0)
                         TxSignData::default()
                     };
-                    let assigned_ecdsa =
-                        self.assign_ecdsa(&mut ctx, &mut ecc_chip, &scalar_chip, &ecdsa_chip, &tx)?;
+                    let assigned_ecdsa = self.assign_ecdsa(
+                        &mut ctx,
+                        &main_gate,
+                        &range_chip,
+                        &ecc_chip,
+                        &scalar_chip,
+                        &ecdsa_chip,
+                        &tx,
+                    )?;
                     assigned_ecdsas.push(assigned_ecdsa);
                 }
                 println!("DBG ctx_offset = {}", *offset);
