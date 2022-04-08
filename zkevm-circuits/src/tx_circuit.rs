@@ -252,17 +252,17 @@ impl<F: FieldExt> SignVerifyConfig<F> {
         meta.create_gate("when not_padding, ecdsa_result = true", |meta| {
             let q_enable = meta.query_selector(q_enable);
             let ecdsa_result = meta.query_advice(ecdsa_result, Rotation::cur());
-            vec![q_enable * (is_not_padding - ecdsa_result)]
+            vec![q_enable * (is_not_padding.clone() - ecdsa_result)]
         });
 
-        meta.create_gate("address is pk_hash[-20:]", |meta| {
+        meta.create_gate("address is is_not_padding * pk_hash[-20:]", |meta| {
             let q_enable = meta.query_selector(q_enable);
             let pk_hash = pk_hash.map(|c| meta.query_advice(c, Rotation::cur()));
             let address = meta.query_advice(address, Rotation::cur());
 
             let addr_from_pk = int_from_bytes_le(pk_hash[32 - 20..].iter().rev());
 
-            vec![q_enable * (address - addr_from_pk)]
+            vec![q_enable * (address - is_not_padding.clone() * addr_from_pk)]
         });
 
         meta.create_gate("msg_hash in ECDSA equal their bytes", |meta| -> Vec<_> {
@@ -298,7 +298,7 @@ impl<F: FieldExt> SignVerifyConfig<F> {
                 .collect()
         });
 
-        meta.create_gate("msg_hash_rlc = RLC(msg_hash)", |meta| {
+        meta.create_gate("msg_hash_rlc = is_not_padding * RLC(msg_hash)", |meta| {
             let q_enable = meta.query_selector(q_enable);
             let msg_hash = msg_hash.map(|c| meta.query_advice(c, Rotation::cur()));
             let msg_hash_rlc = meta.query_advice(msg_hash_rlc, Rotation::cur());
@@ -307,7 +307,7 @@ impl<F: FieldExt> SignVerifyConfig<F> {
                 msg_hash,
                 &power_of_randomness_exp[..32],
             );
-            vec![q_enable * (msg_hash_rlc - expected_msg_hash_rlc)]
+            vec![q_enable * (msg_hash_rlc - is_not_padding.clone() * expected_msg_hash_rlc)]
         });
 
         // ECDSA config
