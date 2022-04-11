@@ -23,8 +23,8 @@ use integer::{
 use keccak256::plain::Keccak;
 use lazy_static::lazy_static;
 use maingate::{
-    Assigned, AssignedCondition, MainGate, MainGateConfig, RangeChip, RangeConfig,
-    RangeInstructions, RegionCtx, UnassignedValue,
+    Assigned, AssignedCondition, AssignedValue, MainGate, MainGateConfig, MainGateInstructions,
+    RangeChip, RangeConfig, RangeInstructions, RegionCtx, UnassignedValue,
 };
 use pairing::arithmetic::FieldExt;
 use secp256k1::Secp256k1Affine;
@@ -422,14 +422,59 @@ impl<F: FieldExt> SignVerifyConfig<F> {
 }
 
 pub struct AssignedECDSA<F: FieldExt> {
-    pk_x: AssignedInteger<secp256k1::Fp, F>,
-    pk_y: AssignedInteger<secp256k1::Fp, F>,
-    msg_hash: AssignedInteger<secp256k1::Fq, F>,
+    pk_x_le: [AssignedValue<F>; 32],
+    pk_y_le: [AssignedValue<F>; 32],
+    msg_hash_le: [AssignedValue<F>; 32],
 }
 
 pub struct AssignedSignatureVerify<F: FieldExt> {
     address: AssignedCell<F, F>,
     msg_hash_rlc: AssignedCell<F, F>,
+}
+
+// Returns assigned constants [256^1, 256^2, .., 256^{n-1}]
+fn assign_pows_256<F: FieldExt>(
+    ctx: &mut RegionCtx<'_, '_, F>,
+    main_gate: &MainGate<F>,
+    n: usize,
+) -> Result<Vec<AssignedValue<F>>, Error> {
+    let mut pows = Vec::new();
+    for i in 1..n {
+        pows.push(main_gate.assign_constant(ctx, F::from(256).pow(&[i as u64, 0, 0, 0]))?);
+    }
+    Ok(pows)
+}
+
+// Return an array of bytes that corresponds to the little endian representation
+// of the integer, adding the constraints to verify the correctness of the
+// conversion (byte range check included).
+fn integer_to_bytes_le<F: FieldExt, W: WrongExt>(
+    ctx: &mut RegionCtx<'_, '_, F>,
+    main_gate: &MainGate<F>,
+    range_chip: &RangeChip<F>,
+    pows_256: &[AssignedValue<F>],
+    int: &AssignedInteger<W, F>,
+) -> Result<[AssignedValue<F>; 32], Error> {
+    let mut int_le = Vec::new();
+    int_le.extend(int.limbs()[0].decompose(9, 8).unwrap());
+    int_le.extend(int.limbs()[1].decompose(9, 8).unwrap());
+    int_le.extend(int.limbs()[2].decompose(9, 8).unwrap());
+    int_le.extend(int.limbs()[3].decompose(5, 8).unwrap());
+    let int_le: [F; 32] = int_le.try_into().unwrap();
+    let int_le = int_le.map(|b| {
+        range_chip
+            .range_value(ctx, &UnassignedValue::from(Some(b)), 8)
+            .expect("FIXME")
+    });
+    for (j, positions) in [1..9, 1..9, 1..9, 1..5].iter().enumerate() {
+        let mut acc = int_le[j].clone();
+        for i in positions.clone() {
+            let shifted = main_gate.mul(ctx, int_le[i].clone(), pows_256[i - 1].clone())?;
+            acc = main_gate.add(ctx, acc, shifted)?;
+        }
+        main_gate.assert_equal(ctx, acc, int.limbs()[j].clone())?;
+    }
+    Ok(int_le)
 }
 
 impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
@@ -469,7 +514,9 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             .write(&mut Cursor::new(&mut msg_hash_le[..]))
             .unwrap();
         let msg_hash_le = msg_hash_le.map(|b| {
-            range_chip.range_value(ctx, &UnassignedValue::from(Some(F::from(b as u64))), 8)
+            range_chip
+                .range_value(ctx, &UnassignedValue::from(Some(F::from(b as u64))), 8)
+                .expect("FIXME")
         });
         let pk_coord = pk.coordinates().unwrap();
         let mut pk_x_le = [0u8; 32];
@@ -489,16 +536,6 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             range_chip.range_value(ctx, &UnassignedValue::from(Some(F::from(b as u64))), 8)
         });
 
-        // TODO: Using the following `main_gate` functions: `assign_constant`, `mul`,
-        // `add` and `assert_equal`, constraint the following for `msg_hash`,
-        // `pk_x` and `pk_y`: `limb_i = \sum_{j=0}^8 byte_{i*9 + j} * 256^i`.
-        // Then return the bytes in AssignedECDSA instead of the limbs, and do copy
-        // constraints over the bytes.
-
-        // TODO: Update once halo2wrong suports the following methods:
-        // - `IntegerChip::assign_integer_from_bytes_le`
-        // - `GeneralEccChip::assing_point_from_bytes_le`
-
         let integer_r = ecc_chip.new_unassigned_scalar(Some(*sig_r));
         let integer_s = ecc_chip.new_unassigned_scalar(Some(*sig_s));
         let msg_hash = ecc_chip.new_unassigned_scalar(Some(*msg_hash));
@@ -517,10 +554,26 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         let msg_hash = scalar_chip.assign_integer(ctx, msg_hash)?;
         ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
 
+        // TODO: Using the following `main_gate` functions: `assign_constant`, `mul`,
+        // `add` and `assert_equal`, constraint the following for `msg_hash`,
+        // `pk_x` and `pk_y`: `limb_i = \sum_{j=0}^8 byte_{i*9 + j} * 256^i`.
+        // Then return the bytes in AssignedECDSA instead of the limbs, and do copy
+        // constraints over the bytes.
+        let pows_256 = assign_pows_256(ctx, main_gate, 9)?;
+        let msg_hash_le = integer_to_bytes_le(ctx, main_gate, range_chip, &pows_256, &msg_hash)?;
+        let pk_x = pk_assigned.point.get_x();
+        let pk_x_le = integer_to_bytes_le(ctx, main_gate, range_chip, &pows_256, &pk_x)?;
+        let pk_y = pk_assigned.point.get_y();
+        let pk_y_le = integer_to_bytes_le(ctx, main_gate, range_chip, &pows_256, &pk_y)?;
+
+        // TODO: Update once halo2wrong suports the following methods:
+        // - `IntegerChip::assign_integer_from_bytes_le`
+        // - `GeneralEccChip::assing_point_from_bytes_le`
+
         Ok(AssignedECDSA {
-            pk_x: pk_assigned.point.get_x(),
-            pk_y: pk_assigned.point.get_y(),
-            msg_hash,
+            pk_x_le,
+            pk_y_le,
+            msg_hash_le,
         })
     }
 
