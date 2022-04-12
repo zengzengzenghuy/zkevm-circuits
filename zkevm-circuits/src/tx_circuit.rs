@@ -170,7 +170,7 @@ struct SignVerifyConfig<F: FieldExt> {
     msg_hash: [Column<Advice>; 32],
     // msg_hash_limbs: [Column<Advice>; 4],
     // signature: [[Column<Advice>; 32]; 2],
-    power_of_randomness: [Column<Instance>; POW_RAND_SIZE],
+    power_of_randomness: [Expression<F>; POW_RAND_SIZE],
 
     // [is_enabled, input_rlc, input_len, output_rlc]
     keccak_table: [Column<Advice>; 4],
@@ -179,7 +179,7 @@ struct SignVerifyConfig<F: FieldExt> {
 impl<F: FieldExt> SignVerifyConfig<F> {
     pub fn new(
         meta: &mut ConstraintSystem<F>,
-        power_of_randomness: [Column<Instance>; POW_RAND_SIZE],
+        power_of_randomness: [Expression<F>; POW_RAND_SIZE],
     ) -> Self {
         let q_enable = meta.complex_selector();
 
@@ -211,14 +211,14 @@ impl<F: FieldExt> SignVerifyConfig<F> {
         let keccak_table = [(); 4].map(|_| meta.advice_column());
         // let pow_rand_cols = [(); POW_RAND_SIZE].map(|_| meta.instance_column());
 
-        let mut power_of_randomness_exp = None;
-        meta.create_gate("", |meta| {
-            power_of_randomness_exp = Some(
-                power_of_randomness.map(|column| meta.query_instance(column, Rotation::cur())),
-            );
-            [0u8.expr()]
-        });
-        let power_of_randomness_exp = power_of_randomness_exp.unwrap();
+        // let mut power_of_randomness_exp = None;
+        // meta.create_gate("", |meta| {
+        //     power_of_randomness_exp = Some(
+        //         power_of_randomness.map(|column| meta.query_instance(column,
+        // Rotation::cur())),     );
+        //     [0u8.expr()]
+        // });
+        // let power_of_randomness_exp = power_of_randomness_exp.unwrap();
 
         // keccak lookup
         meta.lookup_any("keccak", |meta| {
@@ -245,10 +245,8 @@ impl<F: FieldExt> SignVerifyConfig<F> {
             // let mut pk_be: [_; 64] = (0..64)pk[0] + pk[1];
             pk_be[..32].reverse();
             pk_be[32..].reverse();
-            let pk_rlc = RandomLinearCombination::random_linear_combine_expr(
-                pk_be,
-                &power_of_randomness_exp,
-            );
+            let pk_rlc =
+                RandomLinearCombination::random_linear_combine_expr(pk_be, &power_of_randomness);
             // DBG
             // let pk_rlc = power_of_randomness[..31]
             //     .iter()
@@ -264,10 +262,8 @@ impl<F: FieldExt> SignVerifyConfig<F> {
             let keccak_output_rlc =
                 meta.query_advice(keccak_table[KECCAK_OUTPUT_RLC], Rotation::cur());
             let pk_hash = pk_hash.map(|c| meta.query_advice(c, Rotation::cur()));
-            let pk_hash_rlc = RandomLinearCombination::random_linear_combine_expr(
-                pk_hash,
-                &power_of_randomness_exp,
-            );
+            let pk_hash_rlc =
+                RandomLinearCombination::random_linear_combine_expr(pk_hash, &power_of_randomness);
             table_map.push((selector.clone() * pk_hash_rlc, keccak_output_rlc));
 
             table_map
@@ -326,7 +322,7 @@ impl<F: FieldExt> SignVerifyConfig<F> {
 
             let expected_msg_hash_rlc = RandomLinearCombination::random_linear_combine_expr(
                 msg_hash,
-                &power_of_randomness_exp[..32],
+                &power_of_randomness[..32],
             );
             vec![q_enable * (msg_hash_rlc - is_not_padding.clone() * expected_msg_hash_rlc)]
         });
@@ -575,13 +571,13 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         // Then return the bytes in AssignedECDSA instead of the limbs, and do copy
         // constraints over the bytes.
         let pows_256 = assign_pows_256(ctx, main_gate, 9)?;
-        println!("DBG msg_hash");
+        // println!("DBG msg_hash");
         let msg_hash_le = integer_to_bytes_le(ctx, main_gate, range_chip, &pows_256, &msg_hash)?;
         let pk_x = pk_assigned.point.get_x();
-        println!("DBG pk_x");
+        // println!("DBG pk_x");
         let pk_x_le = integer_to_bytes_le(ctx, main_gate, range_chip, &pows_256, &pk_x)?;
         let pk_y = pk_assigned.point.get_y();
-        println!("DBG pk_y");
+        // println!("DBG pk_y");
         let pk_y_le = integer_to_bytes_le(ctx, main_gate, range_chip, &pows_256, &pk_y)?;
 
         ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
@@ -957,20 +953,18 @@ mod sign_verify_tets {
     impl<F: FieldExt> TestCircuitSignVerifyConfig<F> {
         pub fn new(meta: &mut ConstraintSystem<F>) -> Self {
             let power_of_randomness = {
-                [(); POW_RAND_SIZE].map(|_| meta.instance_column())
-                // let columns = [(); POW_RAND_SIZE].map(|_|
-                // meta.instance_column());
-                // let mut power_of_randomness = None;
+                // [(); POW_RAND_SIZE].map(|_| meta.instance_column())
+                let columns = [(); POW_RAND_SIZE].map(|_| meta.instance_column());
+                let mut power_of_randomness = None;
 
-                // meta.create_gate("power of randomness", |meta| {
-                //     power_of_randomness =
-                //         Some(columns.map(|column| meta.query_instance(column,
-                // Rotation::cur())));
+                meta.create_gate("power of randomness", |meta| {
+                    power_of_randomness =
+                        Some(columns.map(|column| meta.query_instance(column, Rotation::cur())));
 
-                //     [0.expr()]
-                // });
+                    [0.expr()]
+                });
 
-                // power_of_randomness.unwrap()
+                power_of_randomness.unwrap()
             };
 
             let sign_verify = SignVerifyConfig::new(meta, power_of_randomness);
@@ -1081,8 +1075,8 @@ mod sign_verify_tets {
     #[test]
     fn test_sign_verify() {
         let mut rng = XorShiftRng::seed_from_u64(1);
-        const MAX_VERIF: usize = 2;
-        const NUM_TXS: usize = 1;
+        const MAX_VERIF: usize = 4;
+        const NUM_TXS: usize = 3;
         let mut txs = Vec::new();
         for _ in 0..NUM_TXS {
             let (sk, pk) = gen_key_pair(&mut rng);
