@@ -20,6 +20,7 @@ use integer::{
     AssignedInteger, IntegerChip, IntegerConfig, IntegerInstructions, WrongExt,
     NUMBER_OF_LOOKUP_LIMBS,
 };
+use itertools::Itertools;
 use keccak256::plain::Keccak;
 use lazy_static::lazy_static;
 use maingate::{
@@ -106,6 +107,27 @@ fn copy_integer<F: FieldExt, W: WrongExt>(
     Ok(())
 }
 
+/// Enable copy constraints between `src` integer bytes and `dst` integer bytes.
+/// Then assign the `dst` values from `src`.
+fn copy_integer_bytes_le<F: FieldExt>(
+    region: &mut Region<'_, F>,
+    name: &str,
+    src: &[AssignedValue<F>; 32],
+    dst: &[Column<Advice>; 32],
+    offset: usize,
+) -> Result<(), Error> {
+    for (i, byte) in src.iter().enumerate() {
+        let assigned_cell = region.assign_advice(
+            || format!("{} byte {}", name, i),
+            dst[i],
+            offset,
+            || byte.value().clone().ok_or(Error::Synthesis),
+        )?;
+        region.constrain_equal(assigned_cell.cell(), byte.cell())?;
+    }
+    Ok(())
+}
+
 fn assign_integer_bytes_le<F: FieldExt, W: BaseExt>(
     region: &mut Region<'_, F>,
     name: &str,
@@ -142,11 +164,11 @@ struct SignVerifyConfig<F: FieldExt> {
     range_config: RangeConfig,
     // First 32 cells are coord x in little endian, following 32 cells are coord y in little
     // endian.
-    pk: [Column<Advice>; 32 * 2],
-    pk_x_limbs: [Column<Advice>; 4],
-    pk_y_limbs: [Column<Advice>; 4],
+    pk: [[Column<Advice>; 32]; 2],
+    // pk_x_limbs: [Column<Advice>; 4],
+    // pk_y_limbs: [Column<Advice>; 4],
     msg_hash: [Column<Advice>; 32],
-    msg_hash_limbs: [Column<Advice>; 4],
+    // msg_hash_limbs: [Column<Advice>; 4],
     // signature: [[Column<Advice>; 32]; 2],
     power_of_randomness: [Column<Instance>; POW_RAND_SIZE],
 
@@ -161,14 +183,10 @@ impl<F: FieldExt> SignVerifyConfig<F> {
     ) -> Self {
         let q_enable = meta.complex_selector();
 
-        let pk = [(); 32 * 2].map(|_| meta.advice_column());
-        let pk_x_limbs = [(); 4].map(|_| meta.advice_column());
-        pk_x_limbs.map(|c| meta.enable_equality(c));
-        let pk_y_limbs = [(); 4].map(|_| meta.advice_column());
-        pk_y_limbs.map(|c| meta.enable_equality(c));
+        let pk = [(); 2].map(|_| [(); 32].map(|_| meta.advice_column()));
+        pk.map(|coord| coord.map(|c| meta.enable_equality(c)));
         let msg_hash = [(); 32].map(|_| meta.advice_column());
-        let msg_hash_limbs = [(); 4].map(|_| meta.advice_column());
-        msg_hash_limbs.map(|c| meta.enable_equality(c));
+        msg_hash.map(|c| meta.enable_equality(c));
 
         // create address, msg_hash, pk_hash, and msg_hash_inv, and iz_zero
 
@@ -216,7 +234,15 @@ impl<F: FieldExt> SignVerifyConfig<F> {
             // Column 1: input_rlc (pk_rlc)
             let keccak_input_rlc =
                 meta.query_advice(keccak_table[KECCAK_INPUT_RLC], Rotation::cur());
-            let mut pk_be = pk.map(|c| meta.query_advice(c, Rotation::cur()));
+            let mut pk_be: [Expression<F>; 64] = pk
+                .map(|coord| coord.map(|c| meta.query_advice(c, Rotation::cur())))
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<Expression<F>>>()
+                .try_into()
+                .unwrap();
+            // let mut pk_be: [_; 64] = (0..64)pk[0] + pk[1];
             pk_be[..32].reverse();
             pk_be[32..].reverse();
             let pk_rlc = RandomLinearCombination::random_linear_combine_expr(
@@ -257,38 +283,41 @@ impl<F: FieldExt> SignVerifyConfig<F> {
             vec![q_enable * (address - is_not_padding.clone() * addr_from_pk)]
         });
 
-        meta.create_gate("msg_hash in ECDSA equal their bytes", |meta| -> Vec<_> {
-            let q_enable = meta.query_selector(q_enable);
-            let msg_hash = msg_hash.map(|c| meta.query_advice(c, Rotation::cur()));
-            let msg_hash_limbs = msg_hash_limbs.map(|c| meta.query_advice(c, Rotation::cur()));
+        // meta.create_gate("msg_hash in ECDSA equal their bytes", |meta| -> Vec<_> {
+        //     let q_enable = meta.query_selector(q_enable);
+        //     let msg_hash = msg_hash.map(|c| meta.query_advice(c, Rotation::cur()));
+        //     let msg_hash_limbs = msg_hash_limbs.map(|c| meta.query_advice(c,
+        // Rotation::cur()));
 
-            integer_eq_bytes_le(&msg_hash_limbs, &msg_hash)
-                .into_iter()
-                .map(|c| q_enable.clone() * c)
-                .collect()
-        });
-        meta.create_gate("pk x in ECDSA equal their bytes", |meta| -> Vec<_> {
-            let q_enable = meta.query_selector(q_enable);
-            let pk_x: [Column<Advice>; 32] = pk[..32].try_into().unwrap();
-            let pk_x = pk_x.map(|c| meta.query_advice(c.clone(), Rotation::cur()));
-            let pk_x_limbs = pk_x_limbs.map(|c| meta.query_advice(c, Rotation::cur()));
+        //     integer_eq_bytes_le(&msg_hash_limbs, &msg_hash)
+        //         .into_iter()
+        //         .map(|c| q_enable.clone() * c)
+        //         .collect()
+        // });
+        // meta.create_gate("pk x in ECDSA equal their bytes", |meta| -> Vec<_> {
+        //     let q_enable = meta.query_selector(q_enable);
+        //     let pk_x: [Column<Advice>; 32] = pk[0];
+        //     let pk_x = pk_x.map(|c| meta.query_advice(c.clone(), Rotation::cur()));
+        //     let pk_x_limbs = pk_x_limbs.map(|c| meta.query_advice(c,
+        // Rotation::cur()));
 
-            integer_eq_bytes_le(&pk_x_limbs, &pk_x)
-                .into_iter()
-                .map(|c| q_enable.clone() * c)
-                .collect()
-        });
-        meta.create_gate("pk y in ECDSA equal their bytes", |meta| -> Vec<_> {
-            let q_enable = meta.query_selector(q_enable);
-            let pk_y: [Column<Advice>; 32] = pk[32..].try_into().unwrap();
-            let pk_y = pk_y.map(|c| meta.query_advice(c.clone(), Rotation::cur()));
-            let pk_y_limbs = pk_y_limbs.map(|c| meta.query_advice(c, Rotation::cur()));
+        //     integer_eq_bytes_le(&pk_x_limbs, &pk_x)
+        //         .into_iter()
+        //         .map(|c| q_enable.clone() * c)
+        //         .collect()
+        // });
+        // meta.create_gate("pk y in ECDSA equal their bytes", |meta| -> Vec<_> {
+        //     let q_enable = meta.query_selector(q_enable);
+        //     let pk_y: [Column<Advice>; 32] = pk[1];
+        //     let pk_y = pk_y.map(|c| meta.query_advice(c.clone(), Rotation::cur()));
+        //     let pk_y_limbs = pk_y_limbs.map(|c| meta.query_advice(c,
+        // Rotation::cur()));
 
-            integer_eq_bytes_le(&pk_y_limbs, &pk_y)
-                .into_iter()
-                .map(|c| q_enable.clone() * c)
-                .collect()
-        });
+        //     integer_eq_bytes_le(&pk_y_limbs, &pk_y)
+        //         .into_iter()
+        //         .map(|c| q_enable.clone() * c)
+        //         .collect()
+        // });
 
         meta.create_gate("msg_hash_rlc = is_not_padding * RLC(msg_hash)", |meta| {
             let q_enable = meta.query_selector(q_enable);
@@ -320,10 +349,10 @@ impl<F: FieldExt> SignVerifyConfig<F> {
             range_config,
             main_gate_config,
             pk,
-            pk_x_limbs,
-            pk_y_limbs,
+            // pk_x_limbs,
+            // pk_y_limbs,
             msg_hash,
-            msg_hash_limbs,
+            // msg_hash_limbs,
             power_of_randomness,
             keccak_table,
         }
@@ -460,16 +489,20 @@ fn integer_to_bytes_le<F: FieldExt, W: WrongExt>(
     int_le.extend(int.limbs()[1].decompose(9, 8).unwrap());
     int_le.extend(int.limbs()[2].decompose(9, 8).unwrap());
     int_le.extend(int.limbs()[3].decompose(5, 8).unwrap());
-    let int_le: [F; 32] = int_le.try_into().unwrap();
-    let int_le = int_le.map(|b| {
-        range_chip
-            .range_value(ctx, &UnassignedValue::from(Some(b)), 8)
-            .expect("FIXME")
-    });
+    let int_le: Vec<AssignedValue<F>> = int_le
+        .iter()
+        // .map(|b| {
+        //     println!("DBG {:#?}", *b);
+        //     b
+        // })
+        .map(|b| range_chip.range_value(ctx, &UnassignedValue::from(Some(*b)), 8))
+        .try_collect()
+        .expect("FIXME");
+    let int_le: [AssignedValue<F>; 32] = int_le.try_into().unwrap();
     for (j, positions) in [1..9, 1..9, 1..9, 1..5].iter().enumerate() {
-        let mut acc = int_le[j].clone();
+        let mut acc = int_le[j * 9].clone();
         for i in positions.clone() {
-            let shifted = main_gate.mul(ctx, int_le[i].clone(), pows_256[i - 1].clone())?;
+            let shifted = main_gate.mul(ctx, int_le[j * 9 + i].clone(), pows_256[i - 1].clone())?;
             acc = main_gate.add(ctx, acc, shifted)?;
         }
         main_gate.assert_equal(ctx, acc, int.limbs()[j].clone())?;
@@ -509,32 +542,15 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         } = tx;
         let (sig_r, sig_s) = signature;
 
-        let mut msg_hash_le = [0u8; 32];
-        msg_hash
-            .write(&mut Cursor::new(&mut msg_hash_le[..]))
-            .unwrap();
-        let msg_hash_le = msg_hash_le.map(|b| {
-            range_chip
-                .range_value(ctx, &UnassignedValue::from(Some(F::from(b as u64))), 8)
-                .expect("FIXME")
-        });
-        let pk_coord = pk.coordinates().unwrap();
-        let mut pk_x_le = [0u8; 32];
-        let mut pk_y_le = [0u8; 32];
-        pk_coord
-            .x()
-            .write(&mut Cursor::new(&mut pk_x_le[..]))
-            .unwrap();
-        pk_coord
-            .y()
-            .write(&mut Cursor::new(&mut pk_y_le[..]))
-            .unwrap();
-        let pk_x_le = pk_x_le.map(|b| {
-            range_chip.range_value(ctx, &UnassignedValue::from(Some(F::from(b as u64))), 8)
-        });
-        let pk_y_le = pk_y_le.map(|b| {
-            range_chip.range_value(ctx, &UnassignedValue::from(Some(F::from(b as u64))), 8)
-        });
+        // let mut msg_hash_le = [0u8; 32];
+        // msg_hash
+        //     .write(&mut Cursor::new(&mut msg_hash_le[..]))
+        //     .unwrap();
+        // let msg_hash_le = msg_hash_le.map(|b| {
+        //     range_chip
+        //         .range_value(ctx, &UnassignedValue::from(Some(F::from(b as u64))), 8)
+        //         .expect("FIXME1")
+        // });
 
         let integer_r = ecc_chip.new_unassigned_scalar(Some(*sig_r));
         let integer_s = ecc_chip.new_unassigned_scalar(Some(*sig_s));
@@ -552,7 +568,6 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             point: pk_in_circuit,
         };
         let msg_hash = scalar_chip.assign_integer(ctx, msg_hash)?;
-        ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
 
         // TODO: Using the following `main_gate` functions: `assign_constant`, `mul`,
         // `add` and `assert_equal`, constraint the following for `msg_hash`,
@@ -560,11 +575,16 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         // Then return the bytes in AssignedECDSA instead of the limbs, and do copy
         // constraints over the bytes.
         let pows_256 = assign_pows_256(ctx, main_gate, 9)?;
+        println!("DBG msg_hash");
         let msg_hash_le = integer_to_bytes_le(ctx, main_gate, range_chip, &pows_256, &msg_hash)?;
         let pk_x = pk_assigned.point.get_x();
+        println!("DBG pk_x");
         let pk_x_le = integer_to_bytes_le(ctx, main_gate, range_chip, &pows_256, &pk_x)?;
         let pk_y = pk_assigned.point.get_y();
+        println!("DBG pk_y");
         let pk_y_le = integer_to_bytes_le(ctx, main_gate, range_chip, &pows_256, &pk_y)?;
+
+        ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
 
         // TODO: Update once halo2wrong suports the following methods:
         // - `IntegerChip::assign_integer_from_bytes_le`
@@ -594,25 +614,25 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             msg_hash,
         } = tx;
 
-        copy_integer(
+        copy_integer_bytes_le(
             region,
             "pk_x",
-            assigned_ecdsa.pk_x.clone(),
-            &config.pk_x_limbs,
+            &assigned_ecdsa.pk_x_le,
+            &config.pk[0],
             offset,
         )?;
-        copy_integer(
+        copy_integer_bytes_le(
             region,
             "pk_y",
-            assigned_ecdsa.pk_y.clone(),
-            &config.pk_y_limbs,
+            &assigned_ecdsa.pk_y_le,
+            &config.pk[1],
             offset,
         )?;
-        copy_integer(
+        copy_integer_bytes_le(
             region,
             "msg_hash",
-            assigned_ecdsa.msg_hash.clone(),
-            &config.msg_hash_limbs,
+            &assigned_ecdsa.msg_hash_le,
+            &config.msg_hash,
             offset,
         )?;
 
@@ -648,7 +668,7 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             // println!("DBG pk x {:02} = {:02x}", i, byte);
             region.assign_advice(
                 || format!("pk x byte {}", i),
-                config.pk[i],
+                config.pk[0][i],
                 offset,
                 || Ok(F::from(*byte as u64)),
             )?;
@@ -657,7 +677,7 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             // println!("DBG pk y {:02} = {:02x}", i, byte);
             region.assign_advice(
                 || format!("pk y byte {}", i),
-                config.pk[32 + i],
+                config.pk[1][i],
                 offset,
                 || Ok(F::from(*byte as u64)),
             )?;
@@ -732,7 +752,7 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         let main_gate = MainGate::new(config.main_gate_config.clone());
         // TODO: Figure out the best value for RangeChip base_bit_len, when we want to
         // range on 8 bits.
-        let range_chip = RangeChip::new(config.range_config.clone(), 10);
+        let range_chip = RangeChip::new(config.range_config.clone(), 8);
         let mut ecc_chip =
             GeneralEccChip::<Secp256k1Affine, F>::new(config.ecc_chip_config(), BIT_LEN_LIMB);
         let scalar_chip = ecc_chip.scalar_field_chip();
@@ -1070,6 +1090,7 @@ mod sign_verify_tets {
             let sig = sign_with_rng(&mut rng, sk, msg_hash);
             println!("DBG sk: {:#?}", sk);
             println!("DBG pk: {:#?}", pk);
+            println!("DBG msg_hash: {:#?}", msg_hash);
             txs.push(TxSignData {
                 signature: sig,
                 pk,
