@@ -355,7 +355,7 @@ impl<F: FieldExt> SignVerifyConfig<F> {
     }
 }
 
-struct KeccakAux {
+pub struct KeccakAux {
     input: [u8; 64],
     output: [u8; 32],
 }
@@ -446,7 +446,7 @@ impl<F: FieldExt> SignVerifyConfig<F> {
     }
 }
 
-struct AssignedECDSA<F: FieldExt> {
+pub struct AssignedECDSA<F: FieldExt> {
     pk_x_le: [AssignedValue<F>; 32],
     pk_y_le: [AssignedValue<F>; 32],
     msg_hash_le: [AssignedValue<F>; 32],

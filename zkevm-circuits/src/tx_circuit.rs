@@ -6,8 +6,9 @@
 mod sign_verify;
 
 use crate::util::Expr;
-use eth_types::{Address, Field, ToBigEndian, ToLittleEndian, ToScalar, Transaction, Word};
+use eth_types::{Address, Field, ToBigEndian, ToLittleEndian, ToScalar, Transaction, Word, U64};
 use ff::PrimeField;
+use group::GroupEncoding;
 use halo2_proofs::{
     arithmetic::{BaseExt, CurveAffine},
     circuit::{AssignedCell, Layouter, Region, SimpleFloorPlanner},
@@ -17,31 +18,70 @@ use halo2_proofs::{
     },
     poly::Rotation,
 };
+use k256::elliptic_curve::generic_array::{typenum::consts::U32, GenericArray};
+use k256::elliptic_curve::AffineXCoordinate;
+use k256::{ecdsa, PublicKey};
+use libsecp256k1;
+use secp256k1::Secp256k1Affine;
+use sha3::{Digest, Keccak256};
 use sign_verify::{SignData, SignVerifyChip, SignVerifyConfig};
+use std::convert::TryInto;
 use std::{io::Cursor, marker::PhantomData, os::unix::prelude::FileTypeExt};
 
 fn random_linear_combine<F: Field>(bytes: [u8; 32], randomness: F) -> F {
     crate::evm_circuit::util::Word::random_linear_combine(bytes, randomness)
 }
 
-fn recover_pk(r: &Word, s: &Word) {
+fn recover_pk(v: u8, r: &Word, s: &Word, msg_hash: &GenericArray<u8, U32>) -> Secp256k1Affine {
     let r_be = r.to_be_bytes();
     let s_be = s.to_be_bytes();
-    let gar: &GenericArray<u8, U32> = GenericArray::from_slice(&r_be);
-    let gas: &GenericArray<u8, U32> = GenericArray::from_slice(&s_be);
-    let sig = K256Signature::from_scalars(*gar, *gas)?;
-    RecoverableSignature::new(&sig, recovery_id)?
+    /*
+    // let gar: &GenericArray<u8, 32> = GenericArray::from_slice(&r_be);
+    // let gas: &GenericArray<u8, 32> = GenericArray::from_slice(&s_be);
+    // let sig = ecdsa::Signature::from_scalars(*gar, *gas)?;
+    let sig = ecdsa::Signature::from_scalars(r_be, s_be).expect("FIXME");
+    let recovery_id = ecdsa::recoverable::Id::new(v).expect("FIXME");
+    let sig = ecdsa::recoverable::Signature::new(&sig, recovery_id).expect("FIXME");
+    let verif_key = sig
+        .recover_verify_key_from_digest_bytes(msg_hash)
+        .expect("FIXME");
+    let pk: PublicKey = verif_key.into();
+    pk.as_affine()
+    // pk.as_affine().x()
+    */
+    let mut r = libsecp256k1::curve::Scalar::from_int(0);
+    let _ = r.set_b32(&r_be); // TODO Check overflow
+    let mut s = libsecp256k1::curve::Scalar::from_int(0);
+    let _ = s.set_b32(&s_be); // TODO Check overflow
+    let signature = libsecp256k1::Signature { r, s };
+    let msg_hash = libsecp256k1::Message::parse_slice(msg_hash.as_slice()).expect("FIXME");
+    let recovery_id = libsecp256k1::RecoveryId::parse(v).expect("FIXME");
+    let pk = libsecp256k1::recover(&msg_hash, &signature, &recovery_id).expect("FIXME");
+    let pk_be = pk.serialize();
+    let mut pk_le = [0u8; 64];
+    pk_le.copy_from_slice(&pk_be[1..]);
+    pk_le[..32].reverse();
+    pk_le[32..].reverse();
+    Secp256k1Affine::from_bytes(&secp256k1::Serialized(pk_le)).unwrap()
 }
 
-fn tx_to_sign_data(tx: &Transaction) -> SignData {
+fn tx_to_sign_data(tx: &Transaction, chain_id: u64) -> SignData {
     let sig_r_le = tx.r.to_le_bytes();
     let sig_s_le = tx.s.to_le_bytes();
     let sig_r = secp256k1::Fq::from_repr(sig_r_le).unwrap();
     let sig_s = secp256k1::Fq::from_repr(sig_s_le).unwrap();
+    let msg = Vec::new();
+    let msg_hash = Keccak256::digest(&msg);
+    let v = (tx.v.as_u64() - 35 - chain_id * 2) as u8;
+    let pk = recover_pk(v, &tx.r, &tx.s, &msg_hash);
+    // TODO: msg_hash = msg_hash % q
+    let msg_hash: [u8; 32] = msg_hash.as_slice().to_vec().try_into().unwrap();
+    let msg_hash = secp256k1::Fq::from_repr_vartime(msg_hash).unwrap();
     SignData {
         signature: (sig_r, sig_s),
-        /* pub(crate) signature: (secp256k1::Fq, secp256k1::Fq),
-         * pub(crate) pk: Secp256k1Affine,
+        pk,
+        msg_hash,
+        /* pub(crate) pk: Secp256k1Affine,
          * pub(crate) msg_hash: secp256k1::Fq, */
     }
 }
@@ -112,6 +152,7 @@ struct TxCircuit<F: Field, const MAX_TXS: usize, const MAX_CALLDATA: usize> {
     sign_verify: SignVerifyChip<F, MAX_TXS>,
     randomness: F,
     txs: Vec<Transaction>,
+    chain_id: u64,
 }
 
 /// Assigns a tx circuit row and returns the assigned cell of the value in
@@ -160,11 +201,16 @@ impl<F: Field, const MAX_TXS: usize, const MAX_CALLDATA: usize> Circuit<F>
         config: Self::Config,
         mut layouter: impl Layouter<F>,
     ) -> Result<(), Error> {
+        let sign_datas: Vec<SignData> = self
+            .txs
+            .iter()
+            .map(|tx| tx_to_sign_data(tx, self.chain_id))
+            .collect();
         let assigned_sig_verifs = self.sign_verify.assign_txs(
             &config.sign_verify,
             &mut layouter,
             self.randomness,
-            &self.txs,
+            &sign_datas,
         )?;
 
         layouter.assign_region(

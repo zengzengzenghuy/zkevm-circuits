@@ -25,10 +25,10 @@ use halo2_proofs::circuit::Layouter;
 pub(crate) fn r<F: Field>() -> F {
     let mut hasher = Keccak256::new();
     for byte in 0..=u8::MAX {
-        hasher.process(&[byte]);
+        hasher.update(&[byte]);
     }
     let mut r = [0; 64];
-    r[..32].copy_from_slice(hasher.fixed_result().as_slice());
+    r[..32].copy_from_slice(hasher.finalize().as_slice());
     F::from_bytes_wide(&r)
 }
 
