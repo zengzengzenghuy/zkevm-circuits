@@ -7,7 +7,6 @@
 //! looked up. Instead, it will be folded into the bus mapping lookup.
 
 use crate::gadget::Variable;
-use digest::{FixedOutput, Input};
 use eth_types::Field;
 use halo2_proofs::{
     circuit::Region,

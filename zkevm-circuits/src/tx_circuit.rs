@@ -1,34 +1,42 @@
 // TODO Remove this
 #![allow(missing_docs)]
-// TODO Remove this
-#![allow(unused_imports)]
 
 mod sign_verify;
 
 use crate::util::Expr;
-use eth_types::{Address, Bytes, Field, ToBigEndian, ToLittleEndian, ToScalar, Word, U256, U64};
+use eth_types::{Address, Bytes, Field, ToBigEndian, ToLittleEndian, ToScalar, Word, U256};
 use ff::PrimeField;
 use group::GroupEncoding;
 use halo2_proofs::{
-    arithmetic::{BaseExt, CurveAffine},
+    arithmetic::CurveAffine,
     circuit::{AssignedCell, Layouter, Region, SimpleFloorPlanner},
-    plonk::{
-        Advice, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, Instance, Selector,
-        VirtualCells,
-    },
+    plonk::{Advice, Circuit, Column, ConstraintSystem, Error},
     poly::Rotation,
 };
+use itertools::Itertools;
 use k256::elliptic_curve::generic_array::{typenum::consts::U32, GenericArray};
-use k256::elliptic_curve::AffineXCoordinate;
-use k256::{ecdsa, PublicKey};
+use lazy_static::lazy_static;
 use libsecp256k1;
+use log::error;
+use num::Integer;
+use num_bigint::BigUint;
 use rlp::RlpStream;
 use secp256k1::Secp256k1Affine;
 use sha3::{Digest, Keccak256};
 use sign_verify::{SignData, SignVerifyChip, SignVerifyConfig};
 pub use sign_verify::{POW_RAND_SIZE, VERIF_HEIGHT};
-use std::convert::TryInto;
-use std::{io::Cursor, marker::PhantomData, os::unix::prelude::FileTypeExt};
+use std::marker::PhantomData;
+use subtle::CtOption;
+
+lazy_static! {
+    // Scalar
+    static ref SECP256K1_Q: BigUint = BigUint::from_slice(&[
+        0xd0364141, 0xbfd25e8c,
+        0xaf48a03b, 0xbaaedce6,
+        0xfffffffe, 0xffffffff,
+        0xffffffff, 0xffffffff,
+    ]);
+}
 
 #[derive(Clone, Default, Debug)]
 pub struct Transaction {
@@ -64,45 +72,68 @@ fn random_linear_combine<F: Field>(bytes: [u8; 32], randomness: F) -> F {
     crate::evm_circuit::util::Word::random_linear_combine(bytes, randomness)
 }
 
-fn recover_pk(v: u8, r: &Word, s: &Word, msg_hash: &GenericArray<u8, U32>) -> Secp256k1Affine {
+fn recover_pk(
+    v: u8,
+    r: &Word,
+    s: &Word,
+    msg_hash: &GenericArray<u8, U32>,
+) -> Result<Secp256k1Affine, Error> {
     let r_be = r.to_be_bytes();
     let s_be = s.to_be_bytes();
-    /*
-    // let gar: &GenericArray<u8, 32> = GenericArray::from_slice(&r_be);
-    // let gas: &GenericArray<u8, 32> = GenericArray::from_slice(&s_be);
-    // let sig = ecdsa::Signature::from_scalars(*gar, *gas)?;
-    let sig = ecdsa::Signature::from_scalars(r_be, s_be).expect("FIXME");
-    let recovery_id = ecdsa::recoverable::Id::new(v).expect("FIXME");
-    let sig = ecdsa::recoverable::Signature::new(&sig, recovery_id).expect("FIXME");
-    let verif_key = sig
-        .recover_verify_key_from_digest_bytes(msg_hash)
-        .expect("FIXME");
-    let pk: PublicKey = verif_key.into();
-    pk.as_affine()
-    // pk.as_affine().x()
-    */
     let mut r = libsecp256k1::curve::Scalar::from_int(0);
-    let _ = r.set_b32(&r_be); // TODO Check overflow
+    let r_overflow: bool = r.set_b32(&r_be).into();
     let mut s = libsecp256k1::curve::Scalar::from_int(0);
-    let _ = s.set_b32(&s_be); // TODO Check overflow
+    let s_overflow: bool = s.set_b32(&s_be).into();
+    if r_overflow || s_overflow {
+        error!("Overflow on 'r' or 's' signature values");
+        return Err(Error::Synthesis);
+    }
     let signature = libsecp256k1::Signature { r, s };
-    let msg_hash = libsecp256k1::Message::parse_slice(msg_hash.as_slice()).expect("FIXME");
+    let msg_hash = libsecp256k1::Message::parse_slice(msg_hash.as_slice()).map_err(|e| {
+        error!("Message hash parsing from slice failed: {:?}", e);
+        Error::Synthesis
+    })?;
     let recovery_id = libsecp256k1::RecoveryId::parse(v).expect("FIXME");
-    let pk = libsecp256k1::recover(&msg_hash, &signature, &recovery_id).expect("FIXME");
+    let pk = libsecp256k1::recover(&msg_hash, &signature, &recovery_id).map_err(|e| {
+        error!("Public key recovery failed: {:?}", e);
+        Error::Synthesis
+    })?;
     let pk_be = pk.serialize();
     let mut pk_le = [0u8; 64];
     pk_le.copy_from_slice(&pk_be[1..]);
-    // println!("DBG recovered pk: {:x?} {:x?}", &pk_le[..32], &pk_le[32..]);
     pk_le[..32].reverse();
     pk_le[32..].reverse();
-    Secp256k1Affine::from_bytes(&secp256k1::Serialized(pk_le)).unwrap()
+    let pk = Secp256k1Affine::from_bytes(&secp256k1::Serialized(pk_le));
+    ct_option_ok_or(pk, Error::Synthesis).map_err(|e| {
+        error!("Invalid public key little endian bytes");
+        e
+    })
 }
 
-fn tx_to_sign_data(tx: &Transaction, chain_id: u64) -> SignData {
+fn biguint_to_32bytes_le(v: BigUint) -> [u8; 32] {
+    let mut res = [0u8; 32];
+    let v_le = v.to_bytes_le();
+    res[..v_le.len()].copy_from_slice(&v_le);
+    res
+}
+
+fn ct_option_ok_or<T, E>(v: CtOption<T>, err: E) -> Result<T, E> {
+    Option::<T>::from(v).ok_or(err)
+}
+
+fn tx_to_sign_data(tx: &Transaction, chain_id: u64) -> Result<SignData, Error> {
     let sig_r_le = tx.r.to_le_bytes();
     let sig_s_le = tx.s.to_le_bytes();
-    let sig_r = secp256k1::Fq::from_repr(sig_r_le).unwrap();
-    let sig_s = secp256k1::Fq::from_repr(sig_s_le).unwrap();
+    let sig_r =
+        ct_option_ok_or(secp256k1::Fq::from_repr(sig_r_le), Error::Synthesis).map_err(|e| {
+            error!("Invalid 'r' signature value");
+            e
+        })?;
+    let sig_s =
+        ct_option_ok_or(secp256k1::Fq::from_repr(sig_s_le), Error::Synthesis).map_err(|e| {
+            error!("Invalid 's' signature value");
+            e
+        })?;
     // msg = rlp([nonce, gasPrice, gas, to, value, data, sig_v, r, s])
     let mut stream = RlpStream::new_list(9);
     stream
@@ -116,25 +147,23 @@ fn tx_to_sign_data(tx: &Transaction, chain_id: u64) -> SignData {
         .append(&0u32)
         .append(&0u32);
     let msg = stream.out();
-    // println!("DBG tx_rlp: {:x}", msg);
     let msg_hash = Keccak256::digest(&msg);
-    // println!("DBG sighash: {:x}", msg_hash);
     let v = (tx.v - 35 - chain_id * 2) as u8;
-    let pk = recover_pk(v, &tx.r, &tx.s, &msg_hash);
-    // TODO: msg_hash = msg_hash % q
-    let mut msg_hash: [u8; 32] = msg_hash.as_slice().to_vec().try_into().unwrap();
-    msg_hash.reverse();
-    let msg_hash = secp256k1::Fq::from_repr(msg_hash).unwrap();
-    // println!("DBG sign_data sig: {:?} {:?}", sig_r, sig_s);
-    // println!("DBG sign_data pk: {:?}", pk);
-    // println!("DBG sign_data msg_hash: {:?}", msg_hash);
-    SignData {
+    let pk = recover_pk(v, &tx.r, &tx.s, &msg_hash)?;
+    // msg_hash = msg_hash % q
+    let msg_hash = BigUint::from_bytes_be(msg_hash.as_slice());
+    let msg_hash = msg_hash.mod_floor(&*SECP256K1_Q);
+    let msg_hash_le = biguint_to_32bytes_le(msg_hash);
+    let msg_hash = ct_option_ok_or(secp256k1::Fq::from_repr(msg_hash_le), Error::Synthesis)
+        .map_err(|e| {
+            error!("Invalid msg hash value");
+            e
+        })?;
+    Ok(SignData {
         signature: (sig_r, sig_s),
         pk,
         msg_hash,
-        /* pub(crate) pk: Secp256k1Affine,
-         * pub(crate) msg_hash: secp256k1::Fq, */
-    }
+    })
 }
 
 // TODO: Deduplicate with
@@ -173,7 +202,6 @@ impl<F: Field> TxCircuitConfig<F> {
         meta.enable_equality(value);
 
         let power_of_randomness = {
-            // [(); POW_RAND_SIZE].map(|_| meta.instance_column())
             let columns = [(); sign_verify::POW_RAND_SIZE].map(|_| meta.instance_column());
             let mut power_of_randomness = None;
 
@@ -257,8 +285,13 @@ impl<F: Field, const MAX_TXS: usize, const MAX_CALLDATA: usize> Circuit<F>
         let sign_datas: Vec<SignData> = self
             .txs
             .iter()
-            .map(|tx| tx_to_sign_data(tx, self.chain_id))
-            .collect();
+            .map(|tx| {
+                tx_to_sign_data(tx, self.chain_id).map_err(|e| {
+                    error!("tx_to_sign_data error for tx {:?}", tx);
+                    e
+                })
+            })
+            .try_collect()?;
         let assigned_sig_verifs = self.sign_verify.assign_txs(
             &config.sign_verify,
             &mut layouter,
@@ -306,10 +339,16 @@ impl<F: Field, const MAX_TXS: usize, const MAX_CALLDATA: usize> Circuit<F>
                             TxFieldTag::GasPrice,
                             random_linear_combine(tx.gas_price.to_le_bytes(), self.randomness),
                         ),
-                        (TxFieldTag::CallerAddress, tx.from.to_scalar().unwrap()),
+                        (
+                            TxFieldTag::CallerAddress,
+                            tx.from.to_scalar().expect("tx.from too big"),
+                        ),
                         (
                             TxFieldTag::CalleeAddress,
-                            tx.to.unwrap_or(Address::zero()).to_scalar().unwrap(),
+                            tx.to
+                                .unwrap_or(Address::zero())
+                                .to_scalar()
+                                .expect("tx.to too big"),
                         ),
                         (TxFieldTag::IsCreate, F::from(tx.to.is_none() as u64)),
                         (
@@ -327,23 +366,9 @@ impl<F: Field, const MAX_TXS: usize, const MAX_CALLDATA: usize> Circuit<F>
                         offset += 1;
                         match tag {
                             TxFieldTag::CallerAddress => {
-                                let tx_from: F = tx.from.to_scalar().unwrap();
-                                println!(
-                                    "DBG assigned address: {:#?}",
-                                    assigned_sig_verif.address,
-                                );
                                 region.constrain_equal(assigned_cell.cell(), address_cell)?
                             }
                             TxFieldTag::TxSignHash => {
-                                // println!(
-                                //     "DBG copy tx_sign_hash: {:?} - {:?}",
-                                //     assigned_sig_verif.msg_hash_rlc.value(),
-                                //     tx.from.to_scalar().unwrap()
-                                // );
-                                println!(
-                                    "DBG assigned msg_hash_rlc: {:#?}",
-                                    assigned_sig_verif.msg_hash_rlc,
-                                );
                                 region.constrain_equal(assigned_cell.cell(), msg_hash_rlc_cell)?
                             }
                             _ => (),
@@ -369,7 +394,7 @@ impl<F: Field, const MAX_TXS: usize, const MAX_CALLDATA: usize> Circuit<F>
                         calldata_count += 1;
                     }
                 }
-                for i in calldata_count..MAX_CALLDATA {
+                for _ in calldata_count..MAX_CALLDATA {
                     assign_row(
                         &mut region,
                         &config,
@@ -391,18 +416,15 @@ impl<F: Field, const MAX_TXS: usize, const MAX_CALLDATA: usize> Circuit<F>
 #[cfg(test)]
 mod tx_circuit_tests {
     use super::*;
-    use ethers_core::types::{NameOrAddress, TransactionRequest};
-    use ethers_core::utils::keccak256;
-    use ethers_signers::LocalWallet;
-    use rand::RngCore;
-    use rand::SeedableRng;
-    // use rand_xorshift::XorShiftRng;
-    use ethers_signers::Signer;
-    use group::Curve;
-    use group::Group;
-    use halo2_proofs::dev::MockProver;
-    use halo2_proofs::pairing::bn256::Fr;
+    use ethers_core::{
+        types::{NameOrAddress, TransactionRequest},
+        utils::keccak256,
+    };
+    use ethers_signers::{LocalWallet, Signer};
+    use group::{Curve, Group};
+    use halo2_proofs::{dev::MockProver, pairing::bn256::Fr};
     use pretty_assertions::assert_eq;
+    use rand::{CryptoRng, Rng, SeedableRng};
     use rand_chacha::ChaCha20Rng;
 
     fn run<F: Field, const MAX_TXS: usize, const MAX_CALLDATA: usize>(
@@ -420,7 +442,6 @@ mod tx_circuit_tests {
             .collect();
         // SignVerifyChip -> ECDSAChip -> MainGate instance column
         power_of_randomness.push(vec![]);
-        // println!("DBG power_of_randomness: {:?}", power_of_randomness);
         let circuit = TxCircuit::<F, MAX_TXS, MAX_CALLDATA> {
             sign_verify: SignVerifyChip {
                 aux_generator,
@@ -432,7 +453,6 @@ mod tx_circuit_tests {
             chain_id,
         };
 
-        // let public_inputs = vec![vec![]];
         let prover = match MockProver::run(k, &circuit, power_of_randomness) {
             Ok(prover) => prover,
             Err(e) => panic!("{:#?}", e),
@@ -440,24 +460,13 @@ mod tx_circuit_tests {
         assert_eq!(prover.verify(), Ok(()));
     }
 
-    #[test]
-    fn test_tx_pk_recovery() {
-        // Generate a random wallet
-        let mut rng = ChaCha20Rng::seed_from_u64(2);
-        let chain_id: u64 = 1337;
-        let mut txs = Vec::new();
+    fn rand_tx<R: Rng + CryptoRng>(mut rng: R, chain_id: u64) -> Transaction {
         let wallet0 = LocalWallet::new(&mut rng).with_chain_id(chain_id);
-        let signer = wallet0.signer();
-        // println!("DBG addr: {:#?}", wallet0.address());
-        // println!(
-        //     "DBG pk: {:x?}",
-        //     signer.verifying_key().to_bytes().as_slice()
-        // );
         let wallet1 = LocalWallet::new(&mut rng).with_chain_id(chain_id);
         let from = wallet0.address();
         let to = wallet1.address();
         let data = b"hello";
-        let tx0 = TransactionRequest::new()
+        let tx = TransactionRequest::new()
             .from(from)
             .to(to)
             .nonce(3)
@@ -465,19 +474,14 @@ mod tx_circuit_tests {
             .data(data)
             .gas(500_000)
             .gas_price(1234);
-        let tx = tx0;
         let tx_rlp = tx.rlp(chain_id);
         let sighash = keccak256(tx_rlp.as_ref()).into();
         let sig = wallet0.sign_hash(sighash, true);
-        // println!("tx: {:#?}", tx);
-        // println!("tx_rlp: {:x}", tx_rlp);
-        // println!("sighash: {:#?}", sighash);
-        // println!("sig: {:#?}", sig);
         let to = tx.to.map(|to| match to {
             NameOrAddress::Address(a) => a,
             _ => unreachable!(),
         });
-        let tx = Transaction {
+        Transaction {
             from: tx.from.unwrap(),
             to,
             gas: tx.gas.unwrap(),
@@ -488,11 +492,21 @@ mod tx_circuit_tests {
             v: sig.v,
             r: sig.r,
             s: sig.s,
-        };
-        txs.push(tx);
+        }
+    }
 
+    #[test]
+    fn test_tx_pk_recovery() {
+        const NUM_TXS: usize = 1;
         const MAX_TXS: usize = 2;
         const MAX_CALLDATA: usize = 8;
+
+        let mut rng = ChaCha20Rng::seed_from_u64(2);
+        let chain_id: u64 = 1337;
+        let mut txs = Vec::new();
+        for _ in 0..NUM_TXS {
+            txs.push(rand_tx(&mut rng, chain_id));
+        }
 
         run::<Fr, MAX_TXS, MAX_CALLDATA>(txs, chain_id);
     }

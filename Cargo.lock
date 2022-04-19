@@ -4340,9 +4340,11 @@ dependencies = [
  "keccak256",
  "lazy_static",
  "libsecp256k1",
+ "log",
  "maingate",
  "mock",
  "num",
+ "num-bigint",
  "pairing_bn256",
  "paste",
  "pretty_assertions",
@@ -4353,4 +4355,5 @@ dependencies = [
  "secp256k1",
  "serde_json",
  "sha3 0.10.1",
+ "subtle",
 ]
