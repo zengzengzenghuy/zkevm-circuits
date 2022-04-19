@@ -39,14 +39,15 @@ use crate::evm_circuit::util::{and, not, or, select, RandomLinearCombination, Wo
 use crate::util::Expr;
 
 pub const POW_RAND_SIZE: usize = 63;
+pub const VERIF_HEIGHT: usize = 1;
 
 /// Auxiliary Gadget to verify a that a message hash is signed by the public
 /// key corresponding to an Ethereum Address.
 #[derive(Default, Debug)]
 pub(crate) struct SignVerifyChip<F: FieldExt, const MAX_VERIF: usize> {
-    aux_generator: Secp256k1Affine,
-    window_size: usize,
-    _marker: PhantomData<F>,
+    pub aux_generator: Secp256k1Affine,
+    pub window_size: usize,
+    pub _marker: PhantomData<F>,
     // ecdsa_chip: EcdsaChip<Secp256k1Affine, F>,
 }
 
@@ -191,9 +192,11 @@ impl<F: FieldExt> SignVerifyConfig<F> {
         // create address, msg_hash, pk_hash, and msg_hash_inv, and iz_zero
 
         let address = meta.advice_column();
+        meta.enable_equality(address);
         let pk_hash = [(); 32].map(|_| meta.advice_column());
 
         let msg_hash_rlc = meta.advice_column();
+        meta.enable_equality(msg_hash_rlc);
 
         // is_enabled === msg_hash_rlc != 0
 
@@ -930,7 +933,7 @@ pub trait SignVerifyInstruction<F: FieldExt> {
 */
 
 #[cfg(test)]
-mod sign_verify_tets {
+mod sign_verify_tests {
     use super::*;
     use group::Group;
     use halo2_proofs::dev::MockProver;
@@ -1015,8 +1018,6 @@ mod sign_verify_tets {
         }
     }
 
-    const VERIF_HEIGHT: usize = 1;
-
     fn run<F: FieldExt, const MAX_VERIF: usize>(txs: Vec<SignData>) {
         let k = 20;
         let mut rng = XorShiftRng::seed_from_u64(2);
@@ -1072,6 +1073,42 @@ mod sign_verify_tets {
     ) -> (secp256k1::Fq, secp256k1::Fq) {
         let randomness = secp256k1::Fq::random(rng);
         sign(randomness, sk, msg_hash)
+    }
+
+    #[test]
+    fn test_sign_hardcoded() {
+        //
+        // sig: Signature {
+        //     r: 72289366762600295845836892450624591647267218503467104245037762426152520645419,
+        //     s: 22734360234742825082690050080824274404597504879369812287019864671409417588520,
+        //     v: 2709,
+        // }
+        // sighash: 0x97ad3a673eea6e55899604605f7f1d4d0f5a99892870d4d105a0b7a752629b6e
+        // DBG recovered pk: [2f, 93, b, d0, d8, 12, 0, 2a, 22, 9b, 64, a1, cc, 3f, 57,
+        // 1c, c8, 8a, fc, 49, c2, 9, 1b , 1, 95, f7, 2f, 69, 66, 9, c4, 23]
+        // [57, 9d, f0, 1f, 28, 73, 90, c3, 9c, e3, 61, c6, 1e, f0, 6e, e4, eb,
+        // d 5, c2, 77, 85, 8d, 33, 1b, b0, 33, 7e, 3e, 1d, 9f, 49, c3]
+        let mut rng = XorShiftRng::seed_from_u64(1);
+        const MAX_VERIF: usize = 4;
+        const NUM_TXS: usize = 3;
+        let mut txs = Vec::new();
+        for _ in 0..NUM_TXS {
+            let (sk, pk) = gen_key_pair(&mut rng);
+            let msg_hash = gen_msg_hash(&mut rng);
+            let sig = sign_with_rng(&mut rng, sk, msg_hash);
+            println!("DBG sk: {:#?}", sk);
+            println!("DBG pk: {:#?}", pk);
+            println!("DBG msg_hash: {:#?}", msg_hash);
+            txs.push(SignData {
+                signature: sig,
+                pk,
+                msg_hash,
+            });
+        }
+
+        // generate a valid signature
+
+        run::<Fr, MAX_VERIF>(txs);
     }
 
     #[test]
