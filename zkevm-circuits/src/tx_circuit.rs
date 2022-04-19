@@ -92,7 +92,7 @@ fn recover_pk(v: u8, r: &Word, s: &Word, msg_hash: &GenericArray<u8, U32>) -> Se
     let pk_be = pk.serialize();
     let mut pk_le = [0u8; 64];
     pk_le.copy_from_slice(&pk_be[1..]);
-    println!("DBG recovered pk: {:x?} {:x?}", &pk_le[..32], &pk_le[32..]);
+    // println!("DBG recovered pk: {:x?} {:x?}", &pk_le[..32], &pk_le[32..]);
     pk_le[..32].reverse();
     pk_le[32..].reverse();
     Secp256k1Affine::from_bytes(&secp256k1::Serialized(pk_le)).unwrap()
@@ -116,18 +116,18 @@ fn tx_to_sign_data(tx: &Transaction, chain_id: u64) -> SignData {
         .append(&0u32)
         .append(&0u32);
     let msg = stream.out();
-    println!("DBG tx_rlp: {:x}", msg);
+    // println!("DBG tx_rlp: {:x}", msg);
     let msg_hash = Keccak256::digest(&msg);
-    println!("DBG sighash: {:x}", msg_hash);
+    // println!("DBG sighash: {:x}", msg_hash);
     let v = (tx.v - 35 - chain_id * 2) as u8;
     let pk = recover_pk(v, &tx.r, &tx.s, &msg_hash);
     // TODO: msg_hash = msg_hash % q
     let mut msg_hash: [u8; 32] = msg_hash.as_slice().to_vec().try_into().unwrap();
     msg_hash.reverse();
     let msg_hash = secp256k1::Fq::from_repr(msg_hash).unwrap();
-    println!("DBG sign_data sig: {:?} {:?}", sig_r, sig_s);
-    println!("DBG sign_data pk: {:?}", pk);
-    println!("DBG sign_data msg_hash: {:?}", msg_hash);
+    // println!("DBG sign_data sig: {:?} {:?}", sig_r, sig_s);
+    // println!("DBG sign_data pk: {:?}", pk);
+    // println!("DBG sign_data msg_hash: {:?}", msg_hash);
     SignData {
         signature: (sig_r, sig_s),
         pk,
@@ -327,9 +327,23 @@ impl<F: Field, const MAX_TXS: usize, const MAX_CALLDATA: usize> Circuit<F>
                         offset += 1;
                         match tag {
                             TxFieldTag::CallerAddress => {
+                                let tx_from: F = tx.from.to_scalar().unwrap();
+                                println!(
+                                    "DBG assigned address: {:#?}",
+                                    assigned_sig_verif.address,
+                                );
                                 region.constrain_equal(assigned_cell.cell(), address_cell)?
                             }
                             TxFieldTag::TxSignHash => {
+                                // println!(
+                                //     "DBG copy tx_sign_hash: {:?} - {:?}",
+                                //     assigned_sig_verif.msg_hash_rlc.value(),
+                                //     tx.from.to_scalar().unwrap()
+                                // );
+                                println!(
+                                    "DBG assigned msg_hash_rlc: {:#?}",
+                                    assigned_sig_verif.msg_hash_rlc,
+                                );
                                 region.constrain_equal(assigned_cell.cell(), msg_hash_rlc_cell)?
                             }
                             _ => (),
@@ -434,11 +448,11 @@ mod tx_circuit_tests {
         let mut txs = Vec::new();
         let wallet0 = LocalWallet::new(&mut rng).with_chain_id(chain_id);
         let signer = wallet0.signer();
-        println!("DBG addr: {:#?}", wallet0.address());
-        println!(
-            "DBG pk: {:x?}",
-            signer.verifying_key().to_bytes().as_slice()
-        );
+        // println!("DBG addr: {:#?}", wallet0.address());
+        // println!(
+        //     "DBG pk: {:x?}",
+        //     signer.verifying_key().to_bytes().as_slice()
+        // );
         let wallet1 = LocalWallet::new(&mut rng).with_chain_id(chain_id);
         let from = wallet0.address();
         let to = wallet1.address();
@@ -455,10 +469,10 @@ mod tx_circuit_tests {
         let tx_rlp = tx.rlp(chain_id);
         let sighash = keccak256(tx_rlp.as_ref()).into();
         let sig = wallet0.sign_hash(sighash, true);
-        println!("tx: {:#?}", tx);
-        println!("tx_rlp: {:x}", tx_rlp);
-        println!("sighash: {:#?}", sighash);
-        println!("sig: {:#?}", sig);
+        // println!("tx: {:#?}", tx);
+        // println!("tx_rlp: {:x}", tx_rlp);
+        // println!("sighash: {:#?}", sighash);
+        // println!("sig: {:#?}", sig);
         let to = tx.to.map(|to| match to {
             NameOrAddress::Address(a) => a,
             _ => unreachable!(),

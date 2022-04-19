@@ -455,6 +455,7 @@ pub struct AssignedECDSA<F: FieldExt> {
     msg_hash_le: [AssignedValue<F>; 32],
 }
 
+#[derive(Debug)]
 pub(crate) struct AssignedSignatureVerify<F: FieldExt> {
     pub(crate) address: AssignedCell<F, F>,
     pub(crate) msg_hash_rlc: AssignedCell<F, F>,
@@ -520,7 +521,7 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
 
         ecc_chip.assign_aux_generator(ctx, Some(self.aux_generator))?;
         ecc_chip.assign_aux(ctx, self.window_size, 1)?;
-        println!("DBG ctx_offset = {}", *ctx_offset);
+        // println!("DBG ctx_offset = {}", *ctx_offset);
         Ok(())
     }
 
@@ -692,9 +693,9 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         let mut keccak = Keccak::default();
         keccak.update(&pk_bytes_be);
         let pk_hash = keccak.digest();
-        println!("DBG pk_hash: {:x?}", pk_hash);
+        // println!("DBG pk_hash: {:x?}", pk_hash);
         let address = pub_key_hash_to_address(&pk_hash);
-        println!("DBG address: {:?}", address);
+        // println!("DBG address: {:?}", address);
 
         // Assign pk_hash
         for (i, byte) in pk_hash.iter().enumerate() {
@@ -772,6 +773,8 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         layouter.assign_region(
             || "ecdsa chip verification",
             |mut region| {
+                assigned_ecdsas.clear();
+                keccak_auxs.clear();
                 let offset = &mut 0;
                 let mut ctx = RegionCtx::new(&mut region, offset);
                 for i in 0..MAX_VERIF {
@@ -792,15 +795,18 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
                     )?;
                     assigned_ecdsas.push(assigned_ecdsa);
                 }
-                println!("DBG ctx_offset = {}", *offset);
+                // println!("DBG ctx_offset = {}", *offset);
                 Ok(())
             },
         )?;
+        println!("DBG MAX_VERIF {}", MAX_VERIF);
+        println!("DBG assigned_ecdsas.len {}", assigned_ecdsas.len());
 
         let mut assigned_sig_verifs = Vec::new();
         layouter.assign_region(
             || "signature address verify",
             |mut region| {
+                assigned_sig_verifs.clear();
                 let mut offset = 0;
                 for i in 0..MAX_VERIF {
                     let (padding, tx) = if i < txs.len() {
@@ -834,6 +840,11 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         config.load_keccak(layouter, keccak_auxs, randomness)?;
         config.load_range(layouter)?;
 
+        println!(
+            "DBG assigned ({}): {:#?}",
+            assigned_sig_verifs.len(),
+            assigned_sig_verifs
+        );
         Ok(assigned_sig_verifs)
     }
 
@@ -1096,9 +1107,9 @@ mod sign_verify_tests {
             let (sk, pk) = gen_key_pair(&mut rng);
             let msg_hash = gen_msg_hash(&mut rng);
             let sig = sign_with_rng(&mut rng, sk, msg_hash);
-            println!("DBG sk: {:#?}", sk);
-            println!("DBG pk: {:#?}", pk);
-            println!("DBG msg_hash: {:#?}", msg_hash);
+            // println!("DBG sk: {:#?}", sk);
+            // println!("DBG pk: {:#?}", pk);
+            // println!("DBG msg_hash: {:#?}", msg_hash);
             txs.push(SignData {
                 signature: sig,
                 pk,
@@ -1121,9 +1132,9 @@ mod sign_verify_tests {
             let (sk, pk) = gen_key_pair(&mut rng);
             let msg_hash = gen_msg_hash(&mut rng);
             let sig = sign_with_rng(&mut rng, sk, msg_hash);
-            println!("DBG sk: {:#?}", sk);
-            println!("DBG pk: {:#?}", pk);
-            println!("DBG msg_hash: {:#?}", msg_hash);
+            // println!("DBG sk: {:#?}", sk);
+            // println!("DBG pk: {:#?}", pk);
+            // println!("DBG msg_hash: {:#?}", msg_hash);
             txs.push(SignData {
                 signature: sig,
                 pk,
