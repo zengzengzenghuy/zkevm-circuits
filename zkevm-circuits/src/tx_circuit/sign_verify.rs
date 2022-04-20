@@ -201,6 +201,9 @@ impl<F: FieldExt> SignVerifyConfig<F> {
         // lookup keccak table
         let keccak_table = [(); 4].map(|_| meta.advice_column());
 
+        // Ref. spec SignVerifyChip 1. Verify that keccak(pub_key_bytes) = pub_key_hash
+        // by keccak table lookup, where pub_key_bytes is built from the pub_key
+        // in the ecdsa_chip
         // keccak lookup
         meta.lookup_any("keccak", |meta| {
             let q_enable = meta.query_selector(q_enable);
@@ -246,16 +249,20 @@ impl<F: FieldExt> SignVerifyConfig<F> {
             table_map
         });
 
-        meta.create_gate("address is is_not_padding * pk_hash[-20:]", |meta| {
+        // Ref. spec SignVerifyChip 2. Verify that the first 20 bytes of the
+        // pub_key_hash equal the address
+        meta.create_gate("address is pk_hash[-20:]", |meta| {
             let q_enable = meta.query_selector(q_enable);
             let pk_hash = pk_hash.map(|c| meta.query_advice(c, Rotation::cur()));
             let address = meta.query_advice(address, Rotation::cur());
 
             let addr_from_pk = int_from_bytes_le(pk_hash[32 - 20..].iter().rev());
 
-            vec![q_enable * (address - is_not_padding.clone() * addr_from_pk)]
+            vec![q_enable * (address - addr_from_pk)]
         });
 
+        // Ref. spec SignVerifyChip 3. Verify that the signed message in the ecdsa_chip
+        // with RLC encoding corresponds to msg_hash_rlc
         meta.create_gate("msg_hash_rlc = is_not_padding * RLC(msg_hash)", |meta| {
             let q_enable = meta.query_selector(q_enable);
             let msg_hash = msg_hash.map(|c| meta.query_advice(c, Rotation::cur()));
@@ -491,6 +498,7 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         let pk_y = pk_assigned.point.get_y();
         let pk_y_le = integer_to_bytes_le(ctx, main_gate, range_chip, &pows_256, &pk_y)?;
 
+        // Ref. spec SignVerifyChip 4. Verify the ECDSA signature
         ecdsa_chip.verify(ctx, &sig, &pk_assigned, &msg_hash)?;
 
         // TODO: Update once halo2wrong suports the following methods:
@@ -521,6 +529,8 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
             msg_hash,
         } = sign_data;
 
+        // Ref. spec SignVerifyChip 0. Copy constraints between pub_key and msg_hash
+        // bytes of this chip and the ECDSA chip
         copy_integer_bytes_le(
             region,
             "pk_x",
@@ -602,6 +612,7 @@ impl<F: FieldExt, const MAX_VERIF: usize> SignVerifyChip<F, MAX_VERIF> {
         let address = pub_key_hash_to_address(&pk_hash);
 
         // Assign pk_hash
+        let pk_hash = if !padding { pk_hash } else { vec![0u8; 32] };
         for (i, byte) in pk_hash.iter().enumerate() {
             region.assign_advice(
                 || format!("pk_hash byte {}", i),
@@ -788,6 +799,14 @@ lazy_static! {
         let randomness = secp256k1::Fq::one();
         let (sig_r, sig_s) = sign(randomness, sk, msg_hash);
 
+        println!(
+            "DBG sign_data: {:?}",
+            SignData {
+                signature: (sig_r, sig_s),
+                pk,
+                msg_hash,
+            }
+        );
         SignData {
             signature: (sig_r, sig_s),
             pk,

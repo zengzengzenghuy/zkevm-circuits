@@ -364,6 +364,9 @@ impl<F: Field, const MAX_TXS: usize, const MAX_CALLDATA: usize> Circuit<F>
                         let assigned_cell =
                             assign_row(&mut region, &config, offset, i + 1, *tag, 0, *value)?;
                         offset += 1;
+
+                        // Ref. spec 0. Copy constraints using fixed offsets between the tx rows and
+                        // the SignVerifyChip
                         match tag {
                             TxFieldTag::CallerAddress => {
                                 region.constrain_equal(assigned_cell.cell(), address_cell)?
