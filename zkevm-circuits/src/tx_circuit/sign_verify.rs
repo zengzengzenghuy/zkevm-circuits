@@ -901,8 +901,7 @@ mod sign_verify_tests {
         }
     }
 
-    fn run<F: FieldExt, const MAX_VERIF: usize>(txs: Vec<SignData>) {
-        let k = 20;
+    fn run<F: FieldExt, const MAX_VERIF: usize>(k: u32, txs: Vec<SignData>) {
         let mut rng = XorShiftRng::seed_from_u64(2);
         let aux_generator =
             <Secp256k1Affine as CurveAffine>::CurveExt::random(&mut rng).to_affine();
@@ -973,7 +972,8 @@ mod sign_verify_tests {
             });
         }
 
-        run::<Fr, MAX_VERIF>(txs);
+        let k = 20;
+        run::<Fr, MAX_VERIF>(k, txs);
     }
 }
 

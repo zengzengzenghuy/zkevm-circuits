@@ -431,10 +431,10 @@ mod tx_circuit_tests {
     use rand_chacha::ChaCha20Rng;
 
     fn run<F: Field, const MAX_TXS: usize, const MAX_CALLDATA: usize>(
+        k: u32,
         txs: Vec<Transaction>,
         chain_id: u64,
     ) {
-        let k = 20;
         let mut rng = ChaCha20Rng::seed_from_u64(2);
         let aux_generator =
             <Secp256k1Affine as CurveAffine>::CurveExt::random(&mut rng).to_affine();
@@ -455,6 +455,20 @@ mod tx_circuit_tests {
             txs,
             chain_id,
         };
+
+        #[cfg(feature = "dev-graph")]
+        {
+            use plotters::prelude::*;
+            let root = BitMapBackend::new("tx-circuit.png", (16384, 65536)).into_drawing_area();
+            root.fill(&WHITE).unwrap();
+            let root = root.titled("TxCircuit", ("sans-serif", 60)).unwrap();
+            halo2_proofs::dev::CircuitLayout::default()
+                .show_labels(true)
+                .mark_equality_cells(true)
+                .show_equality_constraints(true)
+                .render(20, &circuit, &root)
+                .unwrap();
+        }
 
         let prover = match MockProver::run(k, &circuit, power_of_randomness) {
             Ok(prover) => prover,
@@ -500,9 +514,9 @@ mod tx_circuit_tests {
 
     #[test]
     fn test_tx_pk_recovery() {
-        const NUM_TXS: usize = 1;
+        const NUM_TXS: usize = 2;
         const MAX_TXS: usize = 2;
-        const MAX_CALLDATA: usize = 8;
+        const MAX_CALLDATA: usize = 32;
 
         let mut rng = ChaCha20Rng::seed_from_u64(2);
         let chain_id: u64 = 1337;
@@ -511,6 +525,7 @@ mod tx_circuit_tests {
             txs.push(rand_tx(&mut rng, chain_id));
         }
 
-        run::<Fr, MAX_TXS, MAX_CALLDATA>(txs, chain_id);
+        let k = 19;
+        run::<Fr, MAX_TXS, MAX_CALLDATA>(k, txs, chain_id);
     }
 }

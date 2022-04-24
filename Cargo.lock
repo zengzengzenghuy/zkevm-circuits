@@ -4347,6 +4347,7 @@ dependencies = [
  "num-bigint",
  "pairing_bn256",
  "paste",
+ "plotters",
  "pretty_assertions",
  "rand",
  "rand_chacha",
