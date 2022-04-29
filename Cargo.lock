@@ -1827,6 +1827,7 @@ checksum = "eabb4a44450da02c90444cf74558da904edde8fb4e9035a9a6a4e15445af0bd7"
 [[package]]
 name = "halo2_proofs"
 version = "0.1.0-beta.1"
+source = "git+https://github.com/appliedzkp/halo2.git?tag=v2022_03_06#90f0487e986a8d7a323ec78e7de5ad8bbeeebbd5"
 dependencies = [
  "blake2b_simd 1.0.0",
  "bumpalo",
@@ -1863,6 +1864,9 @@ dependencies = [
  "cfg-if 0.1.10",
  "halo2_proofs 0.1.0-beta.1",
  "halo2_proofs 0.1.0-beta.3",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
 ]
 
 [[package]]
@@ -2120,6 +2124,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "rand",
+ "secp256k1",
  "subtle",
 ]
 
@@ -4347,7 +4352,6 @@ dependencies = [
  "num-bigint",
  "pairing_bn256",
  "paste",
- "plotters",
  "pretty_assertions",
  "rand",
  "rand_chacha",

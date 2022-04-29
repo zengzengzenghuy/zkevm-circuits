@@ -13,7 +13,7 @@ members = [
 ]
 
 [patch.crates-io]
-# halo2_proofs = { git = "https://github.com/appliedzkp/halo2.git", tag = "v2022_03_06" }
+halo2_proofs = { git = "https://github.com/appliedzkp/halo2.git", tag = "v2022_03_06" }
 # halo2_proofs = { git = "https://github.com/appliedzkp/halo2.git", rev = "9d3ab0cf7be57a828df6cedb8f58476b483fdde1" }
 # This fork makes bitvec 0.20.x work with funty 1.1 and funty 1.2.  Without
 # this fork, bitvec 0.20.x is incompatible with funty 1.2, which we depend on,
@@ -21,8 +21,8 @@ members = [
 # is resolved: https://github.com/bitvecto-rs/bitvec/pull/141
 bitvec = { git = "https://github.com/ed255/bitvec.git", rev = "5cfc5fa8496c66872d21905e677120fc3e79693c" }
 
-[patch."https://github.com/appliedzkp/halo2.git"]
-halo2_proofs = { path = "../halo2/halo2_proofs" }
+# [patch."https://github.com/appliedzkp/halo2.git"]
+# halo2_proofs = { path = "../halo2/halo2_proofs" }
 
 # Definition of benchmarks profile to use.
 [profile.bench]

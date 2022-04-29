@@ -1,5 +1,4 @@
-// TODO Remove this
-#![allow(missing_docs)]
+//! The transaction circuit implementation.
 
 mod sign_verify;
 
@@ -8,7 +7,6 @@ use eth_types::{Address, Bytes, Field, ToBigEndian, ToLittleEndian, ToScalar, Wo
 use ff::PrimeField;
 use group::GroupEncoding;
 use halo2_proofs::{
-    arithmetic::CurveAffine,
     circuit::{AssignedCell, Layouter, Region, SimpleFloorPlanner},
     plonk::{Advice, Circuit, Column, ConstraintSystem, Error},
     poly::Rotation,
@@ -38,6 +36,7 @@ lazy_static! {
     ]);
 }
 
+/// Transaction to be verified by the TxCircuit
 #[derive(Clone, Default, Debug)]
 pub struct Transaction {
     /// Sender address
@@ -63,8 +62,11 @@ pub struct Transaction {
     /// Transaction nonce
     pub nonce: U256,
 
+    /// "v" value of the transaction signature
     pub v: u64,
+    /// "r" value of the transaction signature
     pub r: U256,
+    /// "s" value of the transaction signature
     pub s: U256,
 }
 
@@ -93,7 +95,10 @@ fn recover_pk(
         error!("Message hash parsing from slice failed: {:?}", e);
         Error::Synthesis
     })?;
-    let recovery_id = libsecp256k1::RecoveryId::parse(v).expect("FIXME");
+    let recovery_id = libsecp256k1::RecoveryId::parse(v).map_err(|e| {
+        error!("secp256k1::RecoveriId::parse error: {:?}", e);
+        Error::Synthesis
+    })?;
     let pk = libsecp256k1::recover(&msg_hash, &signature, &recovery_id).map_err(|e| {
         error!("Public key recovery failed: {:?}", e);
         Error::Synthesis
@@ -103,7 +108,9 @@ fn recover_pk(
     pk_le.copy_from_slice(&pk_be[1..]);
     pk_le[..32].reverse();
     pk_le[32..].reverse();
-    let pk = Secp256k1Affine::from_bytes(&secp256k1::Serialized(pk_le));
+    let mut pk_bytes = secp256k1::Serialized::default();
+    pk_bytes.as_mut().copy_from_slice(&pk_le[..]);
+    let pk = Secp256k1Affine::from_bytes(&pk_bytes);
     ct_option_ok_or(pk, Error::Synthesis).map_err(|e| {
         error!("Invalid public key little endian bytes");
         e
@@ -168,18 +175,32 @@ fn tx_to_sign_data(tx: &Transaction, chain_id: u64) -> Result<SignData, Error> {
 
 // TODO: Deduplicate with
 // `zkevm-circuits/src/evm_circuit/table.rs::TxContextFieldTag`.
+/// Tag used to identify each field in the transaction in a row of the
+/// transaction table.
 #[derive(Clone, Copy, Debug)]
 pub enum TxFieldTag {
+    /// Unused tag
     Null = 0,
+    /// Nonce
     Nonce,
+    /// Gas
     Gas,
+    /// GasPrice
     GasPrice,
+    /// CallerAddress
     CallerAddress,
+    /// CalleeAddress
     CalleeAddress,
+    /// IsCreate
     IsCreate,
+    /// Value
     Value,
+    /// CallDataLength
     CallDataLength,
+    /// TxSignHash: Hash of the transaction without the signature, used for
+    /// signing.
     TxSignHash,
+    /// CallData
     CallData,
 }
 
@@ -425,7 +446,7 @@ mod tx_circuit_tests {
     };
     use ethers_signers::{LocalWallet, Signer};
     use group::{Curve, Group};
-    use halo2_proofs::{dev::MockProver, pairing::bn256::Fr};
+    use halo2_proofs::{arithmetic::CurveAffine, dev::MockProver, pairing::bn256::Fr};
     use pretty_assertions::assert_eq;
     use rand::{CryptoRng, Rng, SeedableRng};
     use rand_chacha::ChaCha20Rng;
@@ -455,20 +476,6 @@ mod tx_circuit_tests {
             txs,
             chain_id,
         };
-
-        #[cfg(feature = "dev-graph")]
-        {
-            use plotters::prelude::*;
-            let root = BitMapBackend::new("tx-circuit.png", (16384, 65536)).into_drawing_area();
-            root.fill(&WHITE).unwrap();
-            let root = root.titled("TxCircuit", ("sans-serif", 60)).unwrap();
-            halo2_proofs::dev::CircuitLayout::default()
-                .show_labels(true)
-                .mark_equality_cells(true)
-                .show_equality_constraints(true)
-                .render(20, &circuit, &root)
-                .unwrap();
-        }
 
         let prover = match MockProver::run(k, &circuit, power_of_randomness) {
             Ok(prover) => prover,
@@ -513,7 +520,7 @@ mod tx_circuit_tests {
     }
 
     #[test]
-    fn test_tx_pk_recovery() {
+    fn test_tx_circuit() {
         const NUM_TXS: usize = 2;
         const MAX_TXS: usize = 2;
         const MAX_CALLDATA: usize = 32;

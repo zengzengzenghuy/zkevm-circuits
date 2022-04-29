@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 ff = "0.11"
-halo2_proofs = { git = "https://github.com/appliedzkp/halo2.git", rev = "9d3ab0cf7be57a828df6cedb8f58476b483fdde1" }
+halo2_proofs = { git = "https://github.com/appliedzkp/halo2.git", tag = "v2022_03_06" }
 pairing = { git = 'https://github.com/appliedzkp/pairing', package = "pairing_bn256" }
 bigint = "4"
 num = "0.4"
@@ -26,6 +26,7 @@ itertools = "0.10.3"
 lazy_static = "1.4"
 keccak256 = { path = "../keccak256"}
 # ecdsa = { git = "https://github.com/appliedzkp/halo2wrong.git", rev = "00b90e8c3198de0a73cdb6308f7dbea2bd6f24cc", features = ["kzg"] }
+# TODO: Replace by github path once https://github.com/appliedzkp/halo2wrong/pull/25 is merged
 ecdsa = { path = "../../halo2wrong/ecdsa", features = ["kzg"] }
 secp256k1 = { path = "../../halo2wrong/ecc/secp256k1", features = ["kzg"] }
 ecc = { path = "../../halo2wrong/ecc/circuit", features = ["kzg"] }
@@ -39,7 +40,6 @@ rlp = "0.5"
 num-bigint = { version = "0.4" }
 log = "0.4"
 subtle = "2.4"
-plotters = { version = "0.3.0", optional = true }
 
 [dev-dependencies]
 criterion = "0.3"
@@ -57,4 +57,3 @@ harness = false
 [features]
 default = []
 test = []
-dev-graph = ["halo2_proofs/dev-graph", "plotters"]
