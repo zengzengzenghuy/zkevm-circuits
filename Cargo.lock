@@ -1040,6 +1040,7 @@ dependencies = [
 [[package]]
 name = "ecc"
 version = "0.1.0"
+source = "git+https://github.com/ed255/halo2wrong?rev=ed5611493babc39abc41f1249b7b54c4f3c0254c#ed5611493babc39abc41f1249b7b54c4f3c0254c"
 dependencies = [
  "cfg-if 0.1.10",
  "group 0.11.0",
@@ -1054,6 +1055,7 @@ dependencies = [
 [[package]]
 name = "ecdsa"
 version = "0.1.0"
+source = "git+https://github.com/ed255/halo2wrong?rev=ed5611493babc39abc41f1249b7b54c4f3c0254c#ed5611493babc39abc41f1249b7b54c4f3c0254c"
 dependencies = [
  "cfg-if 0.1.10",
  "ecc",
@@ -1860,6 +1862,7 @@ dependencies = [
 [[package]]
 name = "halo2wrong"
 version = "0.1.0"
+source = "git+https://github.com/ed255/halo2wrong?rev=ed5611493babc39abc41f1249b7b54c4f3c0254c#ed5611493babc39abc41f1249b7b54c4f3c0254c"
 dependencies = [
  "cfg-if 0.1.10",
  "halo2_proofs 0.1.0-beta.1",
@@ -2116,6 +2119,7 @@ dependencies = [
 [[package]]
 name = "integer"
 version = "0.1.0"
+source = "git+https://github.com/ed255/halo2wrong?rev=ed5611493babc39abc41f1249b7b54c4f3c0254c#ed5611493babc39abc41f1249b7b54c4f3c0254c"
 dependencies = [
  "cfg-if 0.1.10",
  "group 0.11.0",
@@ -2319,6 +2323,7 @@ dependencies = [
 [[package]]
 name = "maingate"
 version = "0.1.0"
+source = "git+https://github.com/ed255/halo2wrong?rev=ed5611493babc39abc41f1249b7b54c4f3c0254c#ed5611493babc39abc41f1249b7b54c4f3c0254c"
 dependencies = [
  "cfg-if 0.1.10",
  "group 0.11.0",
@@ -3361,6 +3366,7 @@ dependencies = [
 [[package]]
 name = "secp256k1"
 version = "0.0.1"
+source = "git+https://github.com/ed255/halo2wrong?rev=ed5611493babc39abc41f1249b7b54c4f3c0254c#ed5611493babc39abc41f1249b7b54c4f3c0254c"
 dependencies = [
  "blake2b_simd 0.5.11",
  "cfg-if 0.1.10",
