@@ -15,6 +15,7 @@ use halo2_proofs::{
     plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, VirtualCells},
     poly::Rotation,
 };
+use std::convert::TryInto;
 
 use pairing::arithmetic::FieldExt;
 
@@ -123,17 +124,37 @@ impl<
 
     /// Set up custom gates and lookup arguments for this configuration.
     pub(crate) fn configure(meta: &mut ConstraintSystem<F>) -> Self {
-        let rw_counter = meta.advice_column();
-        let is_write = meta.advice_column();
-        let keys = [(); 5].map(|_| meta.advice_column());
-        let keys_diff_inv = [(); 5].map(|_| meta.advice_column());
-        let key2_limbs = [(); 8].map(|_| meta.advice_column());
-        let key4_bytes = [(); 32].map(|_| meta.advice_column());
-        let auxs = [(); 2].map(|_| meta.advice_column());
+        let rw_counter = meta.advice_column_name(format!("rwc"));
+        let is_write = meta.advice_column_name(format!("isWrite"));
+        let keys: [Column<Advice>; 5] = (0..5)
+            .map(|i| meta.advice_column_name(format!("key{}", i)))
+            .collect::<Vec<Column<Advice>>>()
+            .try_into()
+            .unwrap();
+        let keys_diff_inv: [Column<Advice>; 5] = (0..5)
+            .map(|i| meta.advice_column_name(format!("keyDiffInv{}", i)))
+            .collect::<Vec<Column<Advice>>>()
+            .try_into()
+            .unwrap();
+        let key2_limbs: [Column<Advice>; 8] = (0..8)
+            .map(|i| meta.advice_column_name(format!("key2Limb{}", i)))
+            .collect::<Vec<Column<Advice>>>()
+            .try_into()
+            .unwrap();
+        let key4_bytes: [Column<Advice>; 32] = (0..32)
+            .map(|i| meta.advice_column_name(format!("key4Byte{:02}", i)))
+            .collect::<Vec<Column<Advice>>>()
+            .try_into()
+            .unwrap();
+        let auxs: [Column<Advice>; 2] = (0..2)
+            .map(|i| meta.advice_column_name(format!("aux{}", i)))
+            .collect::<Vec<Column<Advice>>>()
+            .try_into()
+            .unwrap();
 
-        let s_enable = meta.fixed_column();
+        let s_enable = meta.fixed_column_name(format!("sEnable"));
 
-        let value = meta.advice_column();
+        let value = meta.advice_column_name(format!("val"));
 
         let rw_counter_table = meta.fixed_column();
         let memory_address_table_zero = meta.fixed_column();

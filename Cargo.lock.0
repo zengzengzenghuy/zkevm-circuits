@@ -1861,6 +1861,7 @@ checksum = "eabb4a44450da02c90444cf74558da904edde8fb4e9035a9a6a4e15445af0bd7"
 [[package]]
 name = "halo2_proofs"
 version = "0.1.0-beta.1"
+source = "git+https://github.com/appliedzkp/halo2.git?tag=v2022_05_03#cfea08dd621fb7ac424b8aac5d5a947fe8307fab"
 dependencies = [
  "blake2b_simd 1.0.0",
  "bumpalo",
@@ -1878,10 +1879,11 @@ dependencies = [
 
 [[package]]
 name = "halo2_proofs"
-version = "0.1.0-beta.4"
-source = "git+https://github.com/zcash/halo2.git#1ccef3b30ab4b585e0bca39e96d7eb5b0d5c413e"
+version = "0.1.0-beta.3"
+source = "git+https://github.com/zcash/halo2.git#406f622e330e23ff91d645d43725e55de665c8e3"
 dependencies = [
  "blake2b_simd 1.0.0",
+ "bumpalo",
  "ff 0.11.0",
  "group 0.11.0",
  "pasta_curves",
@@ -1896,7 +1898,7 @@ source = "git+https://github.com/ed255/halo2wrong?rev=ad96cfa9f8d6cffbdf5215980b
 dependencies = [
  "cfg-if 0.1.10",
  "halo2_proofs 0.1.0-beta.1",
- "halo2_proofs 0.1.0-beta.4",
+ "halo2_proofs 0.1.0-beta.3",
  "num-bigint",
  "num-integer",
  "num-traits",
@@ -2652,8 +2654,8 @@ dependencies = [
 
 [[package]]
 name = "pairing_bn256"
-version = "0.1.1"
-source = "git+https://github.com/appliedzkp/pairing#1da2920e0e0b3de5929111e9d6193b6b4f0d99e3"
+version = "0.1.0"
+source = "git+https://github.com/appliedzkp/pairing#37218794db1ad2e4ce58d29ec22c68238ad556a7"
 dependencies = [
  "ff 0.11.0",
  "group 0.11.0",
@@ -2727,9 +2729,9 @@ dependencies = [
 
 [[package]]
 name = "pasta_curves"
-version = "0.3.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d10d05f1fdbc8c45f133202559b5ed33704fa1e633e96a5776af474779f2ac3f"
+checksum = "82b6fc4f73033f6aa52fdde0c38f1f570e7f2c244f22e441f62a144556891b8c"
 dependencies = [
  "blake2b_simd 1.0.0",
  "ff 0.11.0",
@@ -3522,9 +3524,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.81"
+version = "1.0.80"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b7ce2b32a1aed03c558dc61a5cd328f15aff2dbc17daad8fb8af04d2100e15c"
+checksum = "f972498cf015f7c0746cac89ebe1d6ef10c293b94175a243a2d9442c163d9944"
 dependencies = [
  "itoa 1.0.1",
  "ryu",
