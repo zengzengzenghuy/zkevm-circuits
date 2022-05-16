@@ -171,4 +171,27 @@ mod stackonlyop_tests {
             vec![StackOp::new(1, StackAddress(1023), Word::from(0x79bdf))],
         );
     }
+
+    #[test]
+    fn add_stack_underflow() {
+        let code = bytecode! {
+            ADD
+            STOP
+        };
+
+        // Get the execution steps from the external tracer
+        let block: GethData = TestContext::<2, 1>::new(
+            None,
+            account_0_code_account_1_no_code(code),
+            tx_from_1_to_0,
+            |block, _tx| block.number(0xcafeu64),
+        )
+        .unwrap()
+        .into();
+
+        let mut builder = BlockData::new_from_geth_data(block.clone()).new_circuit_input_builder();
+        builder
+            .handle_block(&block.eth_block, &block.geth_traces)
+            .unwrap();
+    }
 }
