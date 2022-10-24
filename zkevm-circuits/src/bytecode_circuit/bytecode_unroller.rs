@@ -66,19 +66,19 @@ impl<F: Field> Config<F> {
         keccak_table: KeccakTable,
         challenges: Challenges<Expression<F>>,
     ) -> Self {
-        let q_enable = meta.fixed_column();
-        let q_first = meta.fixed_column();
+        let q_enable = meta.named_fixed_column("q_enable");
+        let q_first = meta.named_fixed_column("q_first");
         let q_last = meta.selector();
         let value = bytecode_table.value;
-        let push_rindex = meta.advice_column();
-        let hash_input_rlc = meta.advice_column_in(SecondPhase);
-        let code_length = meta.advice_column();
-        let byte_push_size = meta.advice_column();
-        let is_final = meta.advice_column();
-        let padding = meta.advice_column();
-        let push_rindex_inv = meta.advice_column();
-        let length_inv = meta.advice_column();
-        let push_table = array_init::array_init(|_| meta.fixed_column());
+        let push_rindex = meta.named_advice_column("push_rindex");
+        let hash_input_rlc = meta.named_advice_column_in(SecondPhase,"hash_input_rlc" );
+        let code_length = meta.named_advice_column("code_length");
+        let byte_push_size = meta.named_advice_column("byte_push_size");
+        let is_final = meta.named_advice_column("is_final");
+        let padding = meta.named_advice_column("padding");
+        let push_rindex_inv = meta.named_advice_column("push_rindex_inv");
+        let length_inv = meta.named_advice_column("length_inv");
+        let push_table = array_init::array_init(|_| meta.named_fixed_column("push"));
 
         // A byte is an opcode when `push_rindex == 0` on the previous row,
         // else it's push data.

@@ -281,12 +281,12 @@ impl<F: Field> ExecutionConfig<F> {
         keccak_table: &dyn LookupTable<F>,
     ) -> Self {
         let q_usable = meta.complex_selector();
-        let q_step = meta.advice_column();
-        let num_rows_until_next_step = meta.advice_column();
-        let num_rows_inv = meta.advice_column();
+        let q_step = meta.named_advice_column("evm::q_step");
+        let num_rows_until_next_step = meta.named_advice_column("evm::num_rows_until_next_step");
+        let num_rows_inv = meta.named_advice_column("evm::num_rows_inv");
         let q_step_first = meta.complex_selector();
         let q_step_last = meta.complex_selector();
-        let advices = [(); STEP_WIDTH].map(|_| meta.advice_column());
+        let advices = [(); STEP_WIDTH].map(|_| meta.named_advice_column("evm::adv"));
 
         let step_curr = Step::new(meta, advices, 0);
         let mut height_map = HashMap::new();

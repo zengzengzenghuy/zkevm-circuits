@@ -7,6 +7,9 @@ mod random_linear_combination;
 #[cfg(test)]
 mod test;
 
+/// TODO
+pub mod dev;
+
 use crate::{
     evm_circuit::param::N_BYTES_WORD,
     table::{LookupTable, MptTable, RwTable, RwTableTag},

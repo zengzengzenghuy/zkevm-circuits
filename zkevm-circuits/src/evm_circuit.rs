@@ -42,8 +42,8 @@ impl<F: Field> EvmCircuit<F> {
         copy_table: &dyn LookupTable<F>,
         keccak_table: &dyn LookupTable<F>,
     ) -> Self {
-        let fixed_table = [(); 4].map(|_| meta.fixed_column());
-        let byte_table = [(); 1].map(|_| meta.fixed_column());
+        let fixed_table = [(); 4].map(|_| meta.named_fixed_column("evm::fixed"));
+        let byte_table = [(); 1].map(|_| meta.named_fixed_column("evm::byte"));
         let execution = Box::new(ExecutionConfig::configure(
             meta,
             power_of_randomness,
@@ -337,7 +337,7 @@ pub mod test {
         }
     }
 
-    pub fn run_test_circuit<F: Field>(block: Block<F>) -> Result<(), Vec<VerifyFailure>> {
+    pub fn build_mockprover<F: Field>(block: Block<F>) -> (MockProver<F>, Vec<usize>, Vec<usize>) {
         let fixed_table_tags = detect_fixed_table_tags(&block);
         let log2_ceil = |n| u32::BITS - (n as u32).leading_zeros() - (n & (n - 1) == 0) as u32;
 
@@ -362,11 +362,21 @@ pub mod test {
         let power_of_randomness = (1..32)
             .map(|exp| vec![block.randomness.pow(&[exp, 0, 0, 0]); (1 << k) - 64])
             .collect();
-        let (active_gate_rows, active_lookup_rows) = TestCircuit::get_active_rows(&block);
+    
+        let (active_gate_rows, active_lookup_rows) = TestCircuit::get_active_rows(&block); 
         let circuit = TestCircuit::<F>::new(block, fixed_table_tags);
-        let prover = MockProver::<F>::run(k, &circuit, power_of_randomness).unwrap();
-        prover.verify_at_rows(active_gate_rows.into_iter(), active_lookup_rows.into_iter())
+    
+        (MockProver::<F>::run(k, &circuit, power_of_randomness).unwrap(),
+        active_gate_rows,active_lookup_rows) 
+    
+    
     }
+
+    pub fn run_test_circuit<F: Field>(block: Block<F>) -> Result<(), Vec<VerifyFailure>> {
+        let (prover, gates, lookups ) = build_mockprover(block);
+        prover.verify_at_rows(gates.into_iter(), lookups.into_iter())
+    }
+
 }
 
 #[cfg(test)]

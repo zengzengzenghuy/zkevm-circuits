@@ -7,12 +7,21 @@ use ethers_core::k256::ecdsa::SigningKey;
 use ethers_core::types::TransactionRequest;
 use ethers_signers::{LocalWallet, Signer};
 use external_tracer::TraceConfig;
-use halo2_proofs::dev::MockProver;
+use halo2_proofs::dev::CellValue;
+use halo2_proofs::halo2curves::bn256::Fr;
+use halo2_proofs::{
+    dev::MockProver,
+    plonk::{Any, Column},
+};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use std::{collections::HashMap, str::FromStr};
+use std::iter::Extend;
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 use thiserror::Error;
-use zkevm_circuits::{super_circuit::SuperCircuit, test_util::BytecodeTestConfig};
+use zkevm_circuits::super_circuit::SuperCircuit;
 
 const EVMERR_OOG: &str = "out of gas";
 const EVMERR_STACKUNDERFLOW: &str = "stack underflow";
@@ -174,6 +183,94 @@ pub fn geth_trace(st: StateTest) -> Result<GethExecTrace, StateTestError> {
     Ok(geth_traces.remove(0))
 }
 
+pub fn dump_mockprover(prover: &MockProver<Fr>) {
+   
+    let mut unique_columns: HashSet<&Column<Any>> = HashSet::new();
+    prover
+        .regions
+        .iter()
+        .for_each(|reg| unique_columns.extend(reg.columns.iter()));
+
+    let column_names : HashMap<_,_> = unique_columns.into_iter().map(|col| {
+        let offset = match col.column_type() {
+          Any::Instance => unreachable!(),
+          Any::Advice(_) => prover.instance.len(),
+          Any::Fixed => prover.instance.len() + prover.advice.len(),
+        };
+        (offset + col.index(), col)
+    }).collect();     
+
+    let cols_count = prover.instance.len() + prover.advice.len() + prover.fixed.len();
+    let header : Vec<_> = (0..cols_count).map(|n| {
+        let mut text = if n >= prover.advice.len() + prover.instance.len() {
+            format!("F {}", n - prover.instance.len() - prover.advice.len() )
+        } else if n>= prover.instance.len()  {
+            format!("A {}", n - prover.instance.len() )
+        } else {
+            format!("I {}", n )
+        };
+        if let Some(x) = column_names.get(&n) && !x.name().is_empty() {
+            text.push(' ');
+            text.push_str(x.name());
+        }
+        Cell::new(&text) 
+    }).collect();        
+
+    let advice_rows_count = prover.advice.get(0).unwrap_or(&vec![]).len();
+    let fixed_rows_count = prover.fixed.get(0).unwrap_or(&vec![]).len();
+    let instance_rows_count = prover.instance.get(0).unwrap_or(&vec![]).len();
+    let rows_count = std::cmp::max(advice_rows_count, instance_rows_count);
+    let rows_count = std::cmp::max(rows_count, fixed_rows_count);
+
+    use prettytable::*;
+
+    let mut table = Table::new();
+    table.add_row(Row::new(header));
+
+    let fr_cell = |n: &Fr| {
+        let hex = format!("{:?}", n);
+        let mut hexp = &hex[2..];
+        while hexp.len()>1 && hexp.starts_with('0') {
+            hexp = &hexp[1..];
+        }
+
+        if hexp.len() > 8 {
+            Cell::new("BIG")
+        } else {
+            Cell::new(hexp)
+        }
+    };
+
+    for row_idx in 0..rows_count {
+        let mut row = Vec::new();
+       
+        for col_idx in 0..prover.instance.len(){
+            row.push(match prover.instance[col_idx].get(row_idx) {
+                Some(fr) => fr_cell(fr),
+                None => Cell::new("")
+            });
+        }
+        for col_idx in 0..prover.advice.len() {
+            row.push(match prover.advice[col_idx].get(row_idx) {
+                    Some(CellValue::Unassigned) => Cell::new(""),
+                    Some(CellValue::Assigned(n)) => fr_cell(n),
+                    Some(CellValue::Poison(_)) => Cell::new("X"),  
+                    None => Cell::new("")
+            });
+        }
+        for col_idx in 0..prover.fixed.len() {
+            row.push(match prover.fixed[col_idx].get(row_idx) {
+                    Some(CellValue::Unassigned) => Cell::new(""),
+                    Some(CellValue::Assigned(n)) => fr_cell(n),
+                    Some(CellValue::Poison(_)) => Cell::new("X"),  
+                    None => Cell::new("")
+            });
+        }
+        table.add_row(Row::new(row));
+    }
+    table.print_tty(false).unwrap();
+}
+
 pub fn run_test(
     st: StateTest,
     suite: TestSuite,
@@ -296,24 +393,29 @@ pub fn run_test(
 
     if !circuits_config.super_circuit {
         let block_data = BlockData::new_from_geth_data(geth_data);
-        
+
         builder = block_data.new_circuit_input_builder();
         builder
             .handle_block(&eth_block, &geth_traces)
             .map_err(|err| StateTestError::CircuitInput(err.to_string()))?;
-    
+
         let block =
             zkevm_circuits::evm_circuit::witness::block_convert(&builder.block, &builder.code_db);
 
-        let config  = BytecodeTestConfig {
-            enable_evm_circuit_test : true,
-            enable_state_circuit_test: true,
-            gas_limit: u64::MAX
-        };
+        let (evm_prover, evm_gate_rows, evm_lookup_rows) =
+            zkevm_circuits::evm_circuit::test::build_mockprover(block.clone());
+        let (state_prover, state_gate_rows, state_lookup_rows) =
+            zkevm_circuits::state_circuit::dev::build_mockprover(block);
 
-        zkevm_circuits::test_util::test_circuits_using_witness_block(block, config)
+        dump_mockprover(&evm_prover);
+
+        evm_prover
+            .verify_at_rows(evm_gate_rows.into_iter(), evm_lookup_rows.into_iter())
             .map_err(|err| StateTestError::VerifierError(format!("{:#?}", err)))?;
 
+        state_prover
+            .verify_at_rows(state_gate_rows.into_iter(), state_lookup_rows.into_iter())
+            .map_err(|err| StateTestError::VerifierError(format!("{:#?}", err)))?;
     } else {
         geth_data.sign(&wallets);
 
@@ -322,6 +424,7 @@ pub fn run_test(
         builder = _builder;
 
         let prover = MockProver::run(k, &circuit, instance).unwrap();
+        dump_mockprover(&prover);
         prover
             .verify_par()
             .map_err(|err| StateTestError::VerifierError(format!("{:#?}", err)))?;
