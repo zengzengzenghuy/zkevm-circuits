@@ -5,7 +5,7 @@ use crate::{
     operation::{OperationContainer, RWCounter},
     Error,
 };
-use eth_types::{Address, Hash, Word};
+use eth_types::{Address, Word};
 use std::collections::HashMap;
 
 /// Context of a [`Block`] which can mutate in a [`Transaction`].
@@ -67,7 +67,6 @@ pub struct Block {
     pub copy_events: Vec<CopyEvent>,
     /// Inputs to the SHA3 opcode
     pub sha3_inputs: Vec<Vec<u8>>,
-    code: HashMap<Hash, Vec<u8>>,
 }
 
 impl Block {
@@ -102,7 +101,6 @@ impl Block {
             container: OperationContainer::new(),
             txs: Vec::new(),
             copy_events: Vec::new(),
-            code: HashMap::new(),
             sha3_inputs: Vec::new(),
         })
     }
